@@ -11,3 +11,5 @@ pedersen = { path = "../pedersen" }
 # pathfinder = { path = "../pathfinder" }
 num-bigint = { version = "0.4", features = ["rand"] }
 rand_chacha = "0.3"
+structopt = "0.3"
+hex = "0.4.3"
