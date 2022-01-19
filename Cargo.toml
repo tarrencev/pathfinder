@@ -2,5 +2,6 @@
 members = [
     "crates/pathfinder",
     "crates/pedersen",
+    "crates/tree_tool",
 ]
 resolver = "2"
