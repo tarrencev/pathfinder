@@ -129,6 +129,12 @@ impl std::ops::Add for StarkHash {
     }
 }
 
+impl AsRef<[u8; 32]> for StarkHash {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Computes the [Starknet Pedersen hash] on `a` and `b`.
 ///
 /// [Starknet Pedersen hash]: https://docs.starkware.co/starkex-v3/crypto/pedersen-hash-function
