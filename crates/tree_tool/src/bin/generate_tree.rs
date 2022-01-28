@@ -1,7 +1,7 @@
 use pathfinder_lib::state::merkle_tree::MerkleTree;
 use pedersen::{pedersen_hash, StarkHash};
 use rusqlite::Connection;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use web3::types::U256;
 
 const ZERO_HASH: StarkHash = StarkHash::zero();
@@ -18,10 +18,10 @@ fn main() {
         choice = None;
     }
 
-    let parse_and_push = if choice == Some("global") {
-        parse_and_push_global
+    let parse = if choice == Some("global") {
+        parse_global
     } else if choice == Some("storage") {
-        parse_and_push_storage
+        parse_storage
     } else {
         if let Some(other) = choice {
             eprintln!(
@@ -43,9 +43,6 @@ fn main() {
 
     let mut conn = Connection::open_in_memory().unwrap();
 
-    // quick hack to see if committing every row works
-    let commit_every = false;
-
     let root = {
         let transaction = conn.transaction().unwrap();
 
@@ -54,9 +51,6 @@ fn main() {
         let mut buffer = String::new();
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
-
-        let mut first = true;
-        let mut stdout = std::io::stdout();
 
         loop {
             buffer.clear();
@@ -72,31 +66,18 @@ fn main() {
                 continue;
             }
 
-            if commit_every && !first {
-                let root = uut.commit().unwrap();
-                uut = MerkleTree::load("test".to_string(), &transaction, root).unwrap();
-                print!(".");
-                stdout.flush().unwrap();
-            }
+            let (key, value) = parse(buffer);
 
-            if first {
-                first = false;
-            }
-
-            parse_and_push(buffer, &mut uut);
+            uut.set(key, value).expect("how could this fail");
         }
 
         let root = uut.commit().unwrap();
-
-        if commit_every {
-            println!(".");
-        }
 
         transaction.commit().unwrap();
         root
     };
 
-    println!("{:?}", Hex(root.as_ref()));
+    println!("{:?}", root);
 
     let tx = conn.transaction().unwrap();
     let mut stmt = tx.prepare("select hash, data from test").unwrap();
@@ -115,7 +96,7 @@ fn main() {
     }
 }
 
-fn parse_and_push_global(buffer: &str, uut: &mut MerkleTree) {
+fn parse_global(buffer: &str) -> (StarkHash, StarkHash) {
     let (contract_address, buffer) = buffer
         .split_once(' ')
         .expect("expected 3 values, whitespace separated; couldn't find first space");
@@ -141,11 +122,10 @@ fn parse_and_push_global(buffer: &str, uut: &mut MerkleTree) {
 
     // python side does make sure every key is unique before asking the tree code to
     // process it
-    uut.set(contract_address, value)
-        .expect("how could this fail?");
+    (contract_address, value)
 }
 
-fn parse_and_push_storage(buffer: &str, uut: &mut MerkleTree) {
+fn parse_storage(buffer: &str) -> (StarkHash, StarkHash) {
     // here we read just address = value
     // but there's no such thing as splitting whitespace \s+ which I think is what the
     // python side is doing so lets do it like this for a close approximation
@@ -157,7 +137,7 @@ fn parse_and_push_storage(buffer: &str, uut: &mut MerkleTree) {
     let buffer = buffer.trim();
     let value = parse(buffer).unwrap_or_else(|| panic!("invalid value: {:?}", buffer));
 
-    uut.set(address, value).expect("how could this fail?");
+    (address, value)
 }
 
 fn parse(s: &str) -> Option<StarkHash> {
