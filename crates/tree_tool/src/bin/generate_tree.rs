@@ -1,4 +1,4 @@
-use pathfinder_lib::merkle_tree::MerkleTree;
+use pathfinder_lib::state::merkle_tree::MerkleTree;
 use pedersen::{pedersen_hash, StarkHash};
 use rusqlite::Connection;
 use std::io::{BufRead, Write};
