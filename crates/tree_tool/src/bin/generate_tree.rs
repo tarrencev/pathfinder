@@ -5,7 +5,7 @@ use std::io::BufRead;
 use std::sync::Arc;
 use web3::types::U256;
 
-const ZERO_HASH: StarkHash = StarkHash::zero();
+const ZERO_HASH: StarkHash = StarkHash::ZERO;
 
 fn main() {
     let mut args = std::env::args().fuse();
