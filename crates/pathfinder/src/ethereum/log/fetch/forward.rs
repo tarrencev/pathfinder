@@ -13,7 +13,7 @@ use crate::ethereum::{
 /// reorganisations.
 pub struct LogFetcher<T>
 where
-    T: MetaLog + PartialEq + std::fmt::Debug + Clone,
+    T: MetaLog + PartialEq + std::fmt::Debug + Copy + Clone,
 {
     head: Option<T>,
     stride: u64,
@@ -36,7 +36,7 @@ impl From<anyhow::Error> for FetchError {
 
 impl<T> LogFetcher<T>
 where
-    T: MetaLog + PartialEq + std::fmt::Debug + Clone,
+    T: MetaLog + PartialEq + std::fmt::Debug + Copy + Clone,
 {
     /// Creates a [LogFetcher] which fetches logs starting from `head`'s origin on L1.
     /// If `head` is [None] then the starting point is genesis.
@@ -58,15 +58,16 @@ where
         self.head = head;
     }
 
-    pub fn head(&self) -> &Option<T> {
-        &self.head
+    pub fn head(&self) -> Option<T> {
+        self.head
     }
 
     /// Fetches the next set of logs from L1. This set may be empty, in which
     /// case we have reached the current end of the L1 chain.
     pub async fn fetch<Tr: Transport>(
         &mut self,
-        transport: &Web3<Tr>,
+        // transport: &Web3<Tr>,
+        transport: Web3<Tr>,
     ) -> Result<Vec<T>, FetchError> {
         // Algorithm overview.
         //
@@ -109,7 +110,7 @@ where
                 .to_block(BlockNumber::Number(to_block.into()))
                 .build();
 
-            let logs = match get_logs(transport, filter).await {
+            let logs = match get_logs(&transport, filter).await {
                 Ok(logs) => logs,
                 Err(GetLogsError::QueryLimit) => {
                     stride_cap = Some(self.stride);

@@ -38,7 +38,7 @@ pub(super) async fn sync(
     head: Option<StateUpdateLog>,
 ) -> anyhow::Result<()> {
     let eth_api = EthereumImpl {
-        logs: StateRootFetcher::new(head, chain),
+        logs: Arc::new(RwLock::new(StateRootFetcher::new(head, chain))),
         transport,
     };
 
@@ -53,7 +53,7 @@ trait EthereumApi {
 
     fn set_log_head(&mut self, head: Option<StateUpdateLog>);
 
-    fn log_head(&mut self) -> &Option<StateUpdateLog>;
+    fn log_head(&mut self) -> Option<StateUpdateLog>;
 
     async fn block_hash(
         &self,
@@ -61,35 +61,66 @@ trait EthereumApi {
     ) -> anyhow::Result<Option<EthereumBlockHash>>;
 }
 
+use std::{cell::RefCell, sync::Arc};
+use tokio::sync::RwLock;
+
 struct EthereumImpl {
-    logs: StateRootFetcher,
+    // logs: Arc<RefCell<StateRootFetcher>>,
+    logs: Arc<RwLock<StateRootFetcher>>,
     transport: Web3<Http>,
 }
+
+use crate::retry::Retry;
+use std::num::NonZeroU64;
 
 #[async_trait::async_trait]
 impl EthereumApi for EthereumImpl {
     async fn fetch_logs(&mut self) -> Result<Vec<StateUpdateLog>, FetchError> {
-        self.logs.fetch(&self.transport).await
+        // self.logs.fetch(&self.transport).await
+
+        let ff = || async {
+            let logs = self.logs.clone();
+            let transport = self.transport.clone();
+            let mut logs = logs.write().await;
+            logs.fetch(transport).await
+        };
+        let x = Retry::exponential(ff, NonZeroU64::new(2).unwrap())
+            .when(|e| false)
+            .await?;
+        Ok(x)
     }
 
     fn set_log_head(&mut self, head: Option<StateUpdateLog>) {
-        self.logs.set_head(head);
+        self.logs.blocking_write().set_head(head);
     }
 
-    fn log_head(&mut self) -> &Option<StateUpdateLog> {
-        self.logs.head()
+    fn log_head(&mut self) -> Option<StateUpdateLog> {
+        self.logs.blocking_read().head()
     }
 
     async fn block_hash(
         &self,
         block: EthereumBlockNumber,
     ) -> anyhow::Result<Option<EthereumBlockHash>> {
-        Ok(self
-            .transport
-            .eth()
-            .block(block.into())
-            .await?
-            .map(|b| EthereumBlockHash(b.hash.unwrap())))
+        let ff = || async {
+            Ok(self
+                .transport
+                .eth()
+                .block(block.into())
+                .await?
+                .map(|b| EthereumBlockHash(b.hash.unwrap())))
+        };
+
+        Retry::exponential(ff, NonZeroU64::new(2).unwrap())
+            .when(|_e| false)
+            .await
+
+        // Ok(self
+        //     .transport
+        //     .eth()
+        //     .block(block.into())
+        //     .await?
+        //     .map(|b| EthereumBlockHash(b.hash.unwrap())))
     }
 }
 

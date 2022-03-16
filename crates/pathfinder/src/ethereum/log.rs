@@ -17,7 +17,7 @@ use crate::{
 /// as a pair with [StateTransitionFactLog].
 ///
 /// This is emitted by the Starknet core contract.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct StateUpdateLog {
     pub origin: EthOrigin,
     pub global_root: GlobalRoot,
