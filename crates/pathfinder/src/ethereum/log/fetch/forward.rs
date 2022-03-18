@@ -45,7 +45,8 @@ where
     pub fn new(head: Option<T>, chain: Chain) -> Self {
         let base_filter = FilterBuilder::default()
             .address(vec![T::contract_address(chain)])
-            .topics(Some(vec![T::signature()]), None, None, None);
+            .topics(Some(vec![T::signature()]), None, None, None)
+            .limit(5_000);
 
         Self {
             head,
@@ -109,11 +110,21 @@ where
                 .to_block(BlockNumber::Number(to_block.into()))
                 .build();
 
-            let logs = match get_logs(transport, filter).await {
-                Ok(logs) => logs,
+            tracing::trace!(%from_block, %to_block, "Querying L1 logs");
+            let timer = tokio::time::Instant::now();
+            let logs_result = get_logs(transport, filter).await;
+            let timer = timer.elapsed();
+
+            let logs = match logs_result {
+                Ok(logs) => {
+                    tracing::trace!(%from_block, %to_block, time_secs=%timer.as_secs_f32(), log_count=logs.len(), "Query L1 logs success.");
+                    logs
+                }
                 Err(GetLogsError::QueryLimit) => {
                     stride_cap = Some(self.stride);
                     self.stride = (self.stride / 2).max(1);
+
+                    tracing::trace!(%from_block, %to_block, time_secs=%timer.as_secs_f32(),"Query L1 logs hit query limit, reducing range");
 
                     continue;
                 }
@@ -131,8 +142,10 @@ where
 
                     if from_block <= chain_head {
                         self.stride = (chain_head - from_block).max(1);
+                        tracing::trace!(%from_block, %to_block, time_secs=%timer.as_secs_f32(), "Query L1 logs hit unknown block, reducing range");
                         continue;
                     } else {
+                        tracing::trace!(%from_block, %to_block, time_secs=%timer.as_secs_f32(), "Query L1 logs reorg");
                         return Err(FetchError::Reorg);
                     }
                 }
@@ -167,6 +180,7 @@ where
             // If there are no new logs, then either we have reached the end of L1,
             // or we need to increase our query range.
             if logs.is_empty() {
+                tracing::trace!(%from_block, %to_block, "Query L1 logs query was empty, increasing range.");
                 let chain_head = transport
                     .eth()
                     .block_number()
@@ -186,6 +200,8 @@ where
             if let Some(head) = logs.last() {
                 self.head = Some(head.clone());
             }
+
+            tracing::trace!(%from_block, %to_block, time_secs=%timer.as_secs_f32(), log_count=logs.len(), "Query L1 logs complete.");
 
             return Ok(logs);
         }
