@@ -10,6 +10,7 @@ use crate::core::{
 pub mod contract;
 pub mod log;
 pub mod state_update;
+pub mod transport;
 
 /// Ethereum network chains running Starknet.
 #[derive(Debug, Clone, Copy, PartialEq)]
