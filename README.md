@@ -242,6 +242,12 @@ The following environment variables can be passed to the container:
 | PATHFINDER_ETHEREUM_API_PASSWORD   | Password to use during authentication with Ethereum node API |               | no       |
 | PATHFINDER_HTTP_RPC_ADDRESS        | Address to bind the `pathfinder` RPC server to               | 0.0.0.0:9545  | no       |
 
+### Updating the docker image
+
+```bash
+docker pull eqlabs/pathfinder
+```
+
 ### Building the container image yourself
 
 Building the container image from source code is necessary only in special cases or development.
