@@ -680,7 +680,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(&s.error().to_string(), *error::INVALID_BLOCK_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
             );
         }
     }
@@ -857,7 +857,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_NUMBER)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
             );
         }
     }
@@ -943,7 +943,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_KEY)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_KEY)
             );
         }
 
@@ -970,7 +970,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_KEY)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_KEY)
             );
         }
 
@@ -992,7 +992,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::CONTRACT_NOT_FOUND)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
             );
         }
 
@@ -1016,7 +1016,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::CONTRACT_NOT_FOUND)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
             );
         }
 
@@ -1040,7 +1040,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
             );
         }
 
@@ -1198,7 +1198,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_TX_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_HASH)
             );
         }
     }
@@ -1296,7 +1296,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
             );
         }
 
@@ -1315,7 +1315,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_TX_INDEX)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_INDEX)
             );
         }
     }
@@ -1412,7 +1412,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_NUMBER)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
             );
         }
 
@@ -1430,7 +1430,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_TX_INDEX)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_INDEX)
             );
         }
     }
@@ -1492,7 +1492,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_TX_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_HASH)
             );
         }
     }
@@ -1713,7 +1713,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
             );
         }
     }
@@ -1801,7 +1801,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_NUMBER)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
             );
         }
     }
@@ -1930,7 +1930,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_SELECTOR)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_SELECTOR)
             );
         }
 
@@ -1955,7 +1955,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::CONTRACT_NOT_FOUND)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
             );
         }
 
@@ -1980,7 +1980,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_CALL_DATA)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_CALL_DATA)
             );
         }
 
@@ -2005,7 +2005,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(s.error.to_call_error(), *error::CONTRACT_NOT_FOUND)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
             );
         }
 
@@ -2030,7 +2030,7 @@ mod tests {
                 .unwrap_err();
             assert_matches!(
                 error,
-                Error::Call(s) => assert_eq!(get_err(&s), *error::INVALID_BLOCK_HASH)
+                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
             );
         }
     }
@@ -2401,7 +2401,7 @@ mod tests {
                 assert_matches!(
                     error,
                     Error::Call(s) => assert_eq!(
-                        serde_json::from_str::<serde_json::Value>(&s).unwrap()["error"],
+                        serde_json::from_str::<serde_json::Value>(&s.to_string()).unwrap()["error"],
                         json!({
                             "code": 31,
                             "message": "Requested page size is too big",
