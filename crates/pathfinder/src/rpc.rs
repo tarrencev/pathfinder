@@ -299,27 +299,6 @@ mod tests {
         static ref LOCALHOST: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     }
 
-    mod error {
-        lazy_static::lazy_static! {
-            pub static ref CONTRACT_NOT_FOUND: (i64, String) = (20, "Contract not found".to_owned());
-            pub static ref INVALID_SELECTOR: (i64, String) = (21, "Invalid message selector".to_owned());
-            pub static ref INVALID_CALL_DATA: (i64, String) = (22, "Invalid call data".to_owned());
-            pub static ref INVALID_KEY: (i64, String) = (23, "Invalid storage key".to_owned());
-            pub static ref INVALID_BLOCK_HASH: (i64, String) = (24, "Invalid block hash".to_owned());
-            pub static ref INVALID_TX_HASH: (i64, String) = (25, "Invalid transaction hash".to_owned());
-            pub static ref INVALID_BLOCK_NUMBER: (i64, String) = (26, "Invalid block number".to_owned());
-            pub static ref INVALID_TX_INDEX: (i64, String) = (27, "Invalid transaction index in a block".to_owned());
-        }
-    }
-
-    fn get_err(json_str: &str) -> (i64, String) {
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        (
-            v["error"]["code"].as_i64().unwrap(),
-            v["error"]["message"].as_str().unwrap().to_owned(),
-        )
-    }
-
     // Local test helper
     fn setup_storage() -> Storage {
         use crate::{
@@ -678,10 +657,7 @@ mod tests {
                 .request::<Block>("starknet_getBlockByHash", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidBlockHash, error);
         }
     }
 
@@ -855,9 +831,9 @@ mod tests {
                 .request::<Block>("starknet_getBlockByNumber", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidBlockNumber,
+                error
             );
         }
     }
@@ -941,9 +917,9 @@ mod tests {
                 .request::<StorageValue>("starknet_getStorageAt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_KEY)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidStorageKey,
+                error
             );
         }
 
@@ -968,9 +944,9 @@ mod tests {
                 .request::<StorageValue>("starknet_getStorageAt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_KEY)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidStorageKey,
+                error
             );
         }
 
@@ -990,10 +966,7 @@ mod tests {
                 .request::<StorageValue>("starknet_getStorageAt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::ContractNotFound, error);
         }
 
         #[tokio::test]
@@ -1014,10 +987,7 @@ mod tests {
                 .request::<StorageValue>("starknet_getStorageAt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::ContractNotFound, error);
         }
 
         #[tokio::test]
@@ -1038,10 +1008,7 @@ mod tests {
                 .request::<StorageValue>("starknet_getStorageAt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidBlockHash, error);
         }
 
         #[tokio::test]
@@ -1196,9 +1163,9 @@ mod tests {
                 .request::<Transaction>("starknet_getTransactionByHash", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_HASH)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidTransactionHash,
+                error
             );
         }
     }
@@ -1294,10 +1261,7 @@ mod tests {
                 .request::<Transaction>("starknet_getTransactionByBlockHashAndIndex", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidBlockHash, error);
         }
 
         #[tokio::test]
@@ -1313,9 +1277,9 @@ mod tests {
                 .request::<Transaction>("starknet_getTransactionByBlockHashAndIndex", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_INDEX)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidTransactionIndex,
+                error
             );
         }
     }
@@ -1410,9 +1374,9 @@ mod tests {
                 .request::<Transaction>("starknet_getTransactionByBlockNumberAndIndex", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidBlockNumber,
+                error
             );
         }
 
@@ -1428,9 +1392,9 @@ mod tests {
                 .request::<Transaction>("starknet_getTransactionByBlockNumberAndIndex", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_INDEX)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidTransactionIndex,
+                error
             );
         }
     }
@@ -1490,9 +1454,9 @@ mod tests {
                 .request::<TransactionReceipt>("starknet_getTransactionReceipt", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_TX_HASH)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidTransactionHash,
+                error
             );
         }
     }
@@ -1711,10 +1675,7 @@ mod tests {
                 .request::<u64>("starknet_getBlockTransactionCountByHash", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidBlockHash, error);
         }
     }
 
@@ -1799,9 +1760,9 @@ mod tests {
                 .request::<u64>("starknet_getBlockTransactionCountByNumber", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_NUMBER)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidBlockNumber,
+                error
             );
         }
     }
@@ -1928,9 +1889,9 @@ mod tests {
                 .request::<Vec<CallResultValue>>("starknet_call", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_SELECTOR)
+            assert_eq!(
+                crate::rpc::types::reply::ErrorCode::InvalidMessageSelector,
+                error
             );
         }
 
@@ -1953,10 +1914,7 @@ mod tests {
                 .request::<Vec<CallResultValue>>("starknet_call", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::ContractNotFound, error);
         }
 
         #[tokio::test]
@@ -1978,10 +1936,7 @@ mod tests {
                 .request::<Vec<CallResultValue>>("starknet_call", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_CALL_DATA)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidCallData, error);
         }
 
         #[tokio::test]
@@ -2003,10 +1958,7 @@ mod tests {
                 .request::<Vec<CallResultValue>>("starknet_call", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::CONTRACT_NOT_FOUND)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::ContractNotFound, error);
         }
 
         #[tokio::test]
@@ -2028,10 +1980,7 @@ mod tests {
                 .request::<Vec<CallResultValue>>("starknet_call", params)
                 .await
                 .unwrap_err();
-            assert_matches!(
-                error,
-                Error::Call(s) => assert_eq!(get_err(&s.to_string()), *error::INVALID_BLOCK_HASH)
-            );
+            assert_eq!(crate::rpc::types::reply::ErrorCode::InvalidBlockHash, error);
         }
     }
 
@@ -2398,19 +2347,8 @@ mod tests {
                     .request::<GetEventsResult>("starknet_getEvents", params)
                     .await
                     .unwrap_err();
-                assert_matches!(
-                    error,
-                    Error::Call(s) => assert_eq!(
-                        serde_json::from_str::<serde_json::Value>(&s.to_string()).unwrap()["error"],
-                        json!({
-                            "code": 31,
-                            "message": "Requested page size is too big",
-                            "data": {
-                                "max_page_size": crate::storage::StarknetEventsTable::PAGE_SIZE_LIMIT
-                            }
-                        })
-                    )
-                );
+
+                assert_eq!(crate::rpc::types::reply::ErrorCode::PageSizeTooBig, error);
             }
 
             #[tokio::test]
