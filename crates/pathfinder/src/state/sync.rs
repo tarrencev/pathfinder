@@ -5,10 +5,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::{
-    core::{ContractRoot, GlobalRoot, StarknetBlockHash, StarknetBlockNumber},
+    core::{
+        ContractRoot, GasPrice, GlobalRoot, SequencerAddress, StarknetBlockHash,
+        StarknetBlockNumber,
+    },
     ethereum::{
         log::StateUpdateLog,
         state_update::{DeployedContract, StateUpdate},
+        transport::EthereumTransport,
         Chain,
     },
     rpc::types::reply::{syncing, Syncing as SyncStatus},
@@ -25,7 +29,6 @@ use anyhow::Context;
 use pedersen::StarkHash;
 use rusqlite::{Connection, Transaction};
 use tokio::sync::{mpsc, RwLock};
-use web3::Web3;
 
 pub struct State {
     pub status: RwLock<SyncStatus>,
@@ -39,9 +42,10 @@ impl Default for State {
     }
 }
 
+/// Implements the main sync loop, where L1 and L2 sync results are combined.
 pub async fn sync<Transport, SequencerClient, F1, F2, L1Sync, L2Sync>(
     storage: Storage,
-    transport: Web3<Transport>,
+    transport: Transport,
     chain: Chain,
     sequencer: SequencerClient,
     state: Arc<State>,
@@ -49,12 +53,11 @@ pub async fn sync<Transport, SequencerClient, F1, F2, L1Sync, L2Sync>(
     l2_sync: L2Sync,
 ) -> anyhow::Result<()>
 where
-    Transport: web3::Transport,
+    Transport: EthereumTransport + Clone,
     SequencerClient: sequencer::ClientApi + Clone + Send + Sync + 'static,
     F1: Future<Output = anyhow::Result<()>> + Send + 'static,
     F2: Future<Output = anyhow::Result<()>> + Send + 'static,
-    L1Sync: FnOnce(mpsc::Sender<l1::Event>, Web3<Transport>, Chain, Option<StateUpdateLog>) -> F1
-        + Copy,
+    L1Sync: FnOnce(mpsc::Sender<l1::Event>, Transport, Chain, Option<StateUpdateLog>) -> F1 + Copy,
     L2Sync: FnOnce(
             mpsc::Sender<l2::Event>,
             SequencerClient,
@@ -81,13 +84,16 @@ where
     })?;
 
     // Start update sync-status process.
-    let starting_block = l2_head
-        .map(|(_, hash)| hash)
-        .unwrap_or(StarknetBlockHash(StarkHash::ZERO));
+    let (starting_block_num, starting_block_hash) = l2_head.unwrap_or((
+        // Seems a better choice for an invalid block number than 0
+        StarknetBlockNumber(u64::MAX),
+        StarknetBlockHash(StarkHash::ZERO),
+    ));
     let _status_sync = tokio::spawn(update_sync_status_latest(
         Arc::clone(&state),
         sequencer.clone(),
-        starting_block,
+        starting_block_hash,
+        starting_block_num,
         chain,
     ));
 
@@ -185,7 +191,7 @@ where
                         .map(|u| u.storage_updates.len())
                         .sum();
                     let update_t = std::time::Instant::now();
-                    l2_update(&mut db_conn, block, diff)
+                    l2_update(&mut db_conn, *block, diff)
                         .await
                         .with_context(|| format!("Update L2 state to {}", block_num))?;
                     let block_time = last_block_start.elapsed();
@@ -199,7 +205,8 @@ where
                     match &mut *state.status.write().await {
                         SyncStatus::False(_) => {}
                         SyncStatus::Status(status) => {
-                            status.current_block = block_hash;
+                            status.current_block_hash = block_hash;
+                            status.current_block_num = StarknetBlockNumber(block_num);
                         }
                     }
 
@@ -311,11 +318,12 @@ where
 async fn update_sync_status_latest(
     state: Arc<State>,
     sequencer: impl sequencer::ClientApi,
-    starting_block: StarknetBlockHash,
+    starting_block_hash: StarknetBlockHash,
+    starting_block_num: StarknetBlockNumber,
     chain: Chain,
 ) -> anyhow::Result<()> {
     use crate::rpc::types::{BlockNumberOrTag, Tag};
-    let poll_interval = l2::head_poll_interval(chain);
+    let poll_interval = head_poll_interval(chain);
 
     loop {
         match sequencer
@@ -323,28 +331,36 @@ async fn update_sync_status_latest(
             .await
         {
             Ok(block) => {
-                let latest = block.block_hash.unwrap();
+                let latest_hash = block.block_hash.unwrap();
+                let latest_num = block.block_number.unwrap();
                 // Update the sync status.
                 match &mut *state.status.write().await {
                     sync_status @ SyncStatus::False(_) => {
                         *sync_status = SyncStatus::Status(syncing::Status {
-                            starting_block,
-                            current_block: starting_block,
-                            highest_block: latest,
+                            starting_block_hash,
+                            starting_block_num,
+                            current_block_hash: starting_block_hash,
+                            current_block_num: starting_block_num,
+                            highest_block_hash: latest_hash,
+                            highest_block_num: latest_num,
                         });
 
                         tracing::debug!(
-                            starting=%starting_block.0,
-                            current=%starting_block.0,
-                            highest=%latest.0,
+                            starting_hash=%starting_block_hash.0,
+                            starting_num=%starting_block_num.0,
+                            current_hash=%starting_block_hash.0,
+                            current_num=%starting_block_num.0,
+                            highest_hash=%latest_hash.0,
+                            highest_num=%latest_num.0,
                             "Updated sync status",
                         );
                     }
                     SyncStatus::Status(status) => {
-                        if status.highest_block != latest {
-                            status.highest_block = latest;
+                        if status.highest_block_hash != latest_hash {
+                            status.highest_block_hash = latest_hash;
                             tracing::debug!(
-                                highest=%latest.0,
+                                highest_hash=%latest_hash.0,
+                                highest_num=%latest_num.0,
                                 "Updated sync status",
                             );
                         }
@@ -457,6 +473,11 @@ async fn l2_update(
             hash: block.block_hash.unwrap(),
             root: block.state_root.unwrap(),
             timestamp: block.timestamp,
+            // Default value for cairo <0.8.2 is 0
+            gas_price: block.gas_price.unwrap_or(GasPrice::ZERO),
+            sequencer_address: block
+                .sequencer_address
+                .unwrap_or(SequencerAddress(StarkHash::ZERO)),
         };
         StarknetBlocksTable::insert(&transaction, &starknet_block)
             .context("Insert block into database")?;
@@ -579,44 +600,83 @@ fn deploy_contract(
         .context("Inserting contract hash into contracts table")
 }
 
+/// Interval at which poll for new data when at the head of chain.
+///
+/// Returns the interval to be used when polling while at the head of the chain. The
+/// interval is chosen to provide a good balance between spamming and getting new
+/// block information as it is available. The interval is based on the block creation
+/// time, which is 2 minutes for Goerlie and 2 hours for Mainnet.
+pub fn head_poll_interval(chain: crate::ethereum::Chain) -> std::time::Duration {
+    use crate::ethereum::Chain::*;
+    use std::time::Duration;
+
+    match chain {
+        // 15 minute interval for a 2 hour block time.
+        Mainnet => Duration::from_secs(60 * 15),
+        // 30 second interval for a 2 minute block time.
+        Goerli => Duration::from_secs(30),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{l1, l2};
     use crate::{
         core::{
-            ContractAddress, ContractHash, EthereumBlockHash, EthereumBlockNumber,
-            EthereumLogIndex, EthereumTransactionHash, EthereumTransactionIndex, GlobalRoot,
+            ConstructorParam, ContractAddress, ContractAddressSalt, ContractHash,
+            EthereumBlockHash, EthereumBlockNumber, EthereumLogIndex, EthereumTransactionHash,
+            EthereumTransactionIndex, Fee, GasPrice, GlobalRoot, SequencerAddress,
             StarknetBlockHash, StarknetBlockNumber, StarknetBlockTimestamp,
-            StarknetTransactionHash, StorageAddress, StorageValue,
+            StarknetTransactionHash, StorageAddress, StorageValue, TransactionVersion,
         },
         ethereum,
         rpc::types::{BlockHashOrTag, BlockNumberOrTag},
-        sequencer::{self, error::SequencerError, reply, request},
+        sequencer::{
+            self,
+            error::SequencerError,
+            reply,
+            request::{self, add_transaction::ContractDefinition},
+        },
         state,
         storage::{self, L1StateTable, RefsTable, StarknetBlocksTable, Storage},
     };
-    use futures::{
-        future::BoxFuture,
-        stream::{StreamExt, TryStreamExt},
-    };
-    use jsonrpc_core::{Call, Value};
+    use futures::stream::{StreamExt, TryStreamExt};
     use pedersen::StarkHash;
     use std::{sync::Arc, time::Duration};
     use tokio::sync::mpsc;
-    use web3::{error, types::H256, RequestId, Transport, Web3};
+    use web3::types::H256;
 
-    // Satisfies the sync() api, not really called anywhere in the tests
     #[derive(Debug, Clone)]
     struct FakeTransport;
 
-    impl Transport for FakeTransport {
-        type Out = BoxFuture<'static, error::Result<Value>>;
-
-        fn prepare(&self, _method: &str, _params: Vec<Value>) -> (RequestId, Call) {
+    #[async_trait::async_trait]
+    impl ethereum::transport::EthereumTransport for FakeTransport {
+        async fn block(
+            &self,
+            _: web3::types::BlockId,
+        ) -> web3::Result<Option<web3::types::Block<H256>>> {
             unimplemented!()
         }
 
-        fn send(&self, _id: RequestId, _request: Call) -> Self::Out {
+        async fn block_number(&self) -> web3::Result<u64> {
+            unimplemented!()
+        }
+
+        async fn chain(&self) -> anyhow::Result<ethereum::Chain> {
+            unimplemented!()
+        }
+
+        async fn logs(
+            &self,
+            _: web3::types::Filter,
+        ) -> std::result::Result<Vec<web3::types::Log>, ethereum::transport::LogsError> {
+            unimplemented!()
+        }
+
+        async fn transaction(
+            &self,
+            _: web3::types::TransactionId,
+        ) -> web3::Result<Option<web3::types::Transaction>> {
             unimplemented!()
         }
     }
@@ -694,11 +754,29 @@ mod tests {
         ) -> Result<reply::EthContractAddresses, SequencerError> {
             unimplemented!()
         }
+
+        async fn add_invoke_transaction(
+            &self,
+            _: crate::sequencer::request::Call,
+            _: Fee,
+            _: TransactionVersion,
+        ) -> Result<reply::add_transaction::InvokeResponse, SequencerError> {
+            unimplemented!()
+        }
+
+        async fn add_deploy_transaction(
+            &self,
+            _: ContractAddressSalt,
+            _: Vec<ConstructorParam>,
+            _: ContractDefinition,
+        ) -> Result<reply::add_transaction::DeployResponse, SequencerError> {
+            unimplemented!()
+        }
     }
 
     async fn l1_noop(
         _: mpsc::Sender<l1::Event>,
-        _: Web3<FakeTransport>,
+        _: FakeTransport,
         _: ethereum::Chain,
         _: Option<ethereum::log::StateUpdateLog>,
     ) -> anyhow::Result<()> {
@@ -746,7 +824,9 @@ mod tests {
         pub static ref BLOCK0: reply::Block = reply::Block {
             block_hash: Some(StarknetBlockHash(*A)),
             block_number: Some(StarknetBlockNumber(0)),
+            gas_price: Some(GasPrice::ZERO),
             parent_block_hash: StarknetBlockHash(StarkHash::ZERO),
+            sequencer_address: Some(SequencerAddress(StarkHash::ZERO)),
             state_root: Some(GlobalRoot(StarkHash::ZERO)),
             status: reply::Status::AcceptedOnL1,
             timestamp: crate::core::StarknetBlockTimestamp(0),
@@ -756,7 +836,9 @@ mod tests {
         pub static ref BLOCK1: reply::Block = reply::Block {
             block_hash: Some(StarknetBlockHash(*B)),
             block_number: Some(StarknetBlockNumber(1)),
+            gas_price: Some(GasPrice::from(1)),
             parent_block_hash: StarknetBlockHash(*A),
+            sequencer_address: Some(SequencerAddress(StarkHash::from_be_bytes([1u8; 32]).unwrap())),
             state_root: Some(GlobalRoot(*B)),
             status: reply::Status::AcceptedOnL2,
             timestamp: crate::core::StarknetBlockTimestamp(1),
@@ -768,12 +850,16 @@ mod tests {
             hash: StarknetBlockHash(*A),
             root: GlobalRoot(StarkHash::ZERO),
             timestamp: StarknetBlockTimestamp(0),
+            gas_price: GasPrice::ZERO,
+            sequencer_address: SequencerAddress(StarkHash::ZERO),
         };
         pub static ref STORAGE_BLOCK1: storage::StarknetBlock = storage::StarknetBlock {
             number: StarknetBlockNumber(1),
             hash: StarknetBlockHash(*B),
             root: GlobalRoot(*B),
             timestamp: StarknetBlockTimestamp(1),
+            gas_price: GasPrice::from(1),
+            sequencer_address: SequencerAddress(StarkHash::from_be_bytes([1u8; 32]).unwrap()),
         };
         // Causes root to remain 0
         pub static ref STATE_UPDATE0: ethereum::state_update::StateUpdate = ethereum::state_update::StateUpdate {
@@ -828,7 +914,7 @@ mod tests {
             // UUT
             let _jh = tokio::spawn(state::sync(
                 storage.clone(),
-                Web3::new(FakeTransport),
+                FakeTransport,
                 chain,
                 FakeSequencer,
                 sync_state.clone(),
@@ -893,7 +979,7 @@ mod tests {
             // UUT
             let _jh = tokio::spawn(state::sync(
                 storage.clone(),
-                Web3::new(FakeTransport),
+                FakeTransport,
                 ethereum::Chain::Goerli,
                 FakeSequencer,
                 Arc::new(state::SyncState::default()),
@@ -953,7 +1039,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),
@@ -981,7 +1067,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),
@@ -1010,9 +1096,13 @@ mod tests {
 
         // A simple L2 sync task
         let l2 = move |tx: mpsc::Sender<l2::Event>, _, _, _| async move {
-            tx.send(l2::Event::Update(block(), state_update(), timings))
-                .await
-                .unwrap();
+            tx.send(l2::Event::Update(
+                Box::new(block()),
+                state_update(),
+                timings,
+            ))
+            .await
+            .unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(())
         };
@@ -1035,7 +1125,7 @@ mod tests {
             // UUT
             let _jh = tokio::spawn(state::sync(
                 storage.clone(),
-                Web3::new(FakeTransport),
+                FakeTransport,
                 chain,
                 FakeSequencer,
                 sync_state.clone(),
@@ -1095,7 +1185,7 @@ mod tests {
             // UUT
             let _jh = tokio::spawn(state::sync(
                 storage.clone(),
-                Web3::new(FakeTransport),
+                FakeTransport,
                 ethereum::Chain::Goerli,
                 FakeSequencer,
                 Arc::new(state::SyncState::default()),
@@ -1152,7 +1242,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),
@@ -1195,7 +1285,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),
@@ -1243,7 +1333,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),
@@ -1269,7 +1359,7 @@ mod tests {
         // UUT
         let _jh = tokio::spawn(state::sync(
             storage,
-            Web3::new(FakeTransport),
+            FakeTransport,
             ethereum::Chain::Goerli,
             FakeSequencer,
             Arc::new(state::SyncState::default()),

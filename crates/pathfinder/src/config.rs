@@ -16,11 +16,15 @@ pub enum ConfigOption {
     /// The Ethereum URL.
     EthereumHttpUrl,
     /// The User Agent header value to use for the Ethereum URL.
+    ///
+    /// Deprecated, we now set a version specific user-agent.
     EthereumUserAgent,
     /// The Ethereum password.
     EthereumPassword,
     /// The HTTP-RPC listening socket address.
     HttpRpcAddress,
+    /// Path to the node's data directory.
+    DataDirectory,
 }
 
 impl Display for ConfigOption {
@@ -29,6 +33,7 @@ impl Display for ConfigOption {
             ConfigOption::EthereumHttpUrl => f.write_str("Ethereum HTTP URL"),
             ConfigOption::EthereumUserAgent => f.write_str("Ethereum user agent"),
             ConfigOption::EthereumPassword => f.write_str("Ethereum password"),
+            ConfigOption::DataDirectory => f.write_str("Data directory"),
             ConfigOption::HttpRpcAddress => f.write_str("HTTP-RPC socket address"),
         }
     }
@@ -52,6 +57,8 @@ pub struct Configuration {
     pub ethereum: EthereumConfig,
     /// The HTTP-RPC listening address and port.
     pub http_rpc_addr: SocketAddr,
+    /// The node's data directory.
+    pub data_directory: PathBuf,
 }
 
 impl Configuration {
@@ -90,6 +97,14 @@ impl Configuration {
             None => cli_cfg,
         };
 
-        cfg.try_build()
+        let cfg = cfg.try_build()?;
+
+        if cfg.ethereum.user_agent.is_some() {
+            tracing::warn!(
+                "Ethereum user-agent was provided in the configuration but this option is deprecated. It will be no longer accepted in future releases"
+            );
+        }
+
+        Ok(cfg)
     }
 }

@@ -25,7 +25,7 @@ pub struct Timings {
 #[derive(Debug)]
 pub enum Event {
     /// New L2 [block update](StateUpdate) found.
-    Update(Block, StateUpdate, Timings),
+    Update(Box<Block>, StateUpdate, Timings),
     /// An L2 reorg was detected, contains the reorg-tail which
     /// indicates the oldest block which is now invalid
     /// i.e. reorg-tail + 1 should be the new head.
@@ -53,6 +53,8 @@ pub async fn sync(
     mut head: Option<(StarknetBlockNumber, StarknetBlockHash)>,
     chain: crate::ethereum::Chain,
 ) -> anyhow::Result<()> {
+    use crate::state::sync::head_poll_interval;
+
     'outer: loop {
         // Get the next block from L2.
         let (next, head_hash) = match head {
@@ -159,7 +161,7 @@ pub async fn sync(
 }
 
 enum DownloadBlock {
-    Block(Block),
+    Block(Box<Block>),
     AtHead,
     Reorg,
 }
@@ -174,7 +176,7 @@ async fn download_block(
     let result = sequencer.block_by_number(block_number.into()).await;
 
     match result {
-        Ok(block) => Ok(DownloadBlock::Block(block)),
+        Ok(block) => Ok(DownloadBlock::Block(Box::new(block))),
         Err(SequencerError::StarknetError(err)) if err.code == BlockNotFound => {
             // This would occur if we queried past the head of the chain. We now need to check that
             // a reorg hasn't put us too far in the future. This does run into race conditions with
@@ -372,30 +374,15 @@ async fn download_and_compress_contract(
     })
 }
 
-/// Returns the interval to be used when polling the sequencer while at the head of the chain. The
-/// interval is chosen to provide a good balance between spamming the sequencer and getting new
-/// block information as it is available.
-///
-/// The interval is based on the block creation time, which is 2 minutes for Goerlie and 2 hours for
-/// Mainnet.
-pub fn head_poll_interval(chain: crate::ethereum::Chain) -> Duration {
-    use crate::ethereum::Chain::*;
-    match chain {
-        // 15 minute interval for a 2 hour block time.
-        Mainnet => Duration::from_secs(60 * 15),
-        // 30 second interval for a 2 minute block time.
-        Goerli => Duration::from_secs(30),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     mod sync {
         use super::super::{sync, Event};
         use crate::{
             core::{
-                ContractAddress, ContractHash, GlobalRoot, StarknetBlockHash, StarknetBlockNumber,
-                StarknetBlockTimestamp, StorageAddress, StorageValue,
+                ContractAddress, ContractHash, GasPrice, GlobalRoot, SequencerAddress,
+                StarknetBlockHash, StarknetBlockNumber, StarknetBlockTimestamp, StorageAddress,
+                StorageValue,
             },
             ethereum::state_update,
             rpc::types::{BlockHashOrTag, BlockNumberOrTag, Tag},
@@ -485,7 +472,9 @@ mod tests {
             static ref BLOCK0: reply::Block = reply::Block {
                 block_hash: Some(*BLOCK0_HASH),
                 block_number: Some(BLOCK0_NUMBER),
+                gas_price: Some(GasPrice::ZERO),
                 parent_block_hash: StarknetBlockHash(StarkHash::ZERO),
+                sequencer_address: Some(SequencerAddress(StarkHash::ZERO)),
                 state_root: Some(*GLOBAL_ROOT0),
                 status: reply::Status::AcceptedOnL1,
                 timestamp: StarknetBlockTimestamp(0),
@@ -495,7 +484,9 @@ mod tests {
             static ref BLOCK0_V2: reply::Block = reply::Block {
                 block_hash: Some(*BLOCK0_HASH_V2),
                 block_number: Some(BLOCK0_NUMBER),
+                gas_price: Some(GasPrice::from_be_slice(b"gas price 0 v2").unwrap()),
                 parent_block_hash: StarknetBlockHash(StarkHash::ZERO),
+                sequencer_address: Some(SequencerAddress(StarkHash::from_be_slice(b"sequencer addr. 0 v2").unwrap())),
                 state_root: Some(*GLOBAL_ROOT0_V2),
                 status: reply::Status::AcceptedOnL2,
                 timestamp: StarknetBlockTimestamp(10),
@@ -505,7 +496,9 @@ mod tests {
             static ref BLOCK1: reply::Block = reply::Block {
                 block_hash: Some(*BLOCK1_HASH),
                 block_number: Some(BLOCK1_NUMBER),
+                gas_price: Some(GasPrice::from(1)),
                 parent_block_hash: *BLOCK0_HASH,
+                sequencer_address: Some(SequencerAddress(StarkHash::from_be_slice(b"sequencer address 1").unwrap())),
                 state_root: Some(*GLOBAL_ROOT1),
                 status: reply::Status::AcceptedOnL1,
                 timestamp: StarknetBlockTimestamp(1),
@@ -515,7 +508,9 @@ mod tests {
             static ref BLOCK2: reply::Block = reply::Block {
                 block_hash: Some(*BLOCK2_HASH),
                 block_number: Some(BLOCK2_NUMBER),
+                gas_price: Some(GasPrice::from(2)),
                 parent_block_hash: *BLOCK1_HASH,
+                sequencer_address: Some(SequencerAddress(StarkHash::from_be_slice(b"sequencer address 2").unwrap())),
                 state_root: Some(*GLOBAL_ROOT2),
                 status: reply::Status::AcceptedOnL1,
                 timestamp: StarknetBlockTimestamp(2),
@@ -771,7 +766,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block,state_update,_) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::QueryContractExistance(contract_hashes, sender) => {
@@ -787,7 +782,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block,mut state_update,_) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     state_update.contract_updates.sort();
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE1);
                 });
@@ -836,7 +831,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block,mut state_update,_) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT1_ADDR,
@@ -925,7 +920,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 // Reorg started from the genesis block
@@ -945,7 +940,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH_V2);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0_V2);
+                    assert_eq!(*block, *BLOCK0_V2);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT0_ADDR_V2,
@@ -973,7 +968,11 @@ mod tests {
                 let block1_v2 = reply::Block {
                     block_hash: Some(*BLOCK1_HASH_V2),
                     block_number: Some(BLOCK1_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 1 v2").unwrap()),
                     parent_block_hash: *BLOCK0_HASH_V2,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer addr. 1 v2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT1_V2),
                     status: reply::Status::AcceptedOnL2,
                     timestamp: StarknetBlockTimestamp(4),
@@ -1061,7 +1060,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::QueryContractExistance(contract_hashes, sender) => {
@@ -1077,7 +1076,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, mut state_update, _) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT1_ADDR,
@@ -1088,7 +1087,7 @@ mod tests {
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE1);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK2);
+                    assert_eq!(*block, *BLOCK2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1117,7 +1116,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH_V2);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0_V2);
+                    assert_eq!(*block, *BLOCK0_V2);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT0_ADDR_V2,
@@ -1127,7 +1126,7 @@ mod tests {
                     assert!(state_update.contract_updates.is_empty());
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block1_v2);
+                    assert_eq!(*block, block1_v2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1151,7 +1150,11 @@ mod tests {
                 let block1_v2 = reply::Block {
                     block_hash: Some(*BLOCK1_HASH_V2),
                     block_number: Some(BLOCK1_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 1 v2").unwrap()),
                     parent_block_hash: *BLOCK0_HASH,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer addr. 1 v2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT1_V2),
                     status: reply::Status::AcceptedOnL2,
                     timestamp: StarknetBlockTimestamp(4),
@@ -1161,7 +1164,11 @@ mod tests {
                 let block2_v2 = reply::Block {
                     block_hash: Some(*BLOCK2_HASH_V2),
                     block_number: Some(BLOCK2_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 2 v2").unwrap()),
                     parent_block_hash: *BLOCK1_HASH_V2,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer addr. 2 v2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT2_V2),
                     status: reply::Status::AcceptedOnL2,
                     timestamp: StarknetBlockTimestamp(5),
@@ -1171,7 +1178,11 @@ mod tests {
                 let block3 = reply::Block {
                     block_hash: Some(*BLOCK3_HASH),
                     block_number: Some(BLOCK3_NUMBER),
+                    gas_price: Some(GasPrice::from(3)),
                     parent_block_hash: *BLOCK2_HASH,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer address 3").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT3),
                     status: reply::Status::AcceptedOnL1,
                     timestamp: StarknetBlockTimestamp(3),
@@ -1255,7 +1266,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::QueryContractExistance(contract_hashes, sender) => {
@@ -1271,7 +1282,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, mut state_update, _) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT1_ADDR,
@@ -1282,12 +1293,12 @@ mod tests {
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE1);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK2);
+                    assert_eq!(*block, *BLOCK2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block3);
+                    assert_eq!(*block, block3);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1308,12 +1319,12 @@ mod tests {
                     assert_eq!(tail, BLOCK1_NUMBER);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block1_v2);
+                    assert_eq!(*block, block1_v2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block2_v2);
+                    assert_eq!(*block, block2_v2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1337,7 +1348,11 @@ mod tests {
                 let block2_v2 = reply::Block {
                     block_hash: Some(*BLOCK2_HASH_V2),
                     block_number: Some(BLOCK2_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 2 v2").unwrap()),
                     parent_block_hash: *BLOCK1_HASH,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer addr. 2 v2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT2_V2),
                     status: reply::Status::AcceptedOnL2,
                     timestamp: StarknetBlockTimestamp(5),
@@ -1408,7 +1423,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::QueryContractExistance(contract_hashes, sender) => {
@@ -1424,7 +1439,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, mut state_update, _) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT1_ADDR,
@@ -1435,7 +1450,7 @@ mod tests {
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE1);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK2);
+                    assert_eq!(*block, *BLOCK2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1448,7 +1463,7 @@ mod tests {
                     assert_eq!(tail, BLOCK2_NUMBER);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block2_v2);
+                    assert_eq!(*block, block2_v2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
@@ -1470,7 +1485,11 @@ mod tests {
                 let block1_v2 = reply::Block {
                     block_hash: Some(*BLOCK1_HASH_V2),
                     block_number: Some(BLOCK1_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 1 v2").unwrap()),
                     parent_block_hash: *BLOCK0_HASH,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer addr. 1 v2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT1_V2),
                     status: reply::Status::AcceptedOnL2,
                     timestamp: StarknetBlockTimestamp(4),
@@ -1480,7 +1499,11 @@ mod tests {
                 let block2 = reply::Block {
                     block_hash: Some(*BLOCK2_HASH),
                     block_number: Some(BLOCK2_NUMBER),
+                    gas_price: Some(GasPrice::from_be_slice(b"gas price 2").unwrap()),
                     parent_block_hash: *BLOCK1_HASH_V2,
+                    sequencer_address: Some(SequencerAddress(
+                        StarkHash::from_be_slice(b"sequencer address 2").unwrap(),
+                    )),
                     state_root: Some(*GLOBAL_ROOT2),
                     status: reply::Status::AcceptedOnL1,
                     timestamp: StarknetBlockTimestamp(5),
@@ -1548,7 +1571,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT0_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, *BLOCK0);
+                    assert_eq!(*block, *BLOCK0);
                     assert_eq!(state_update, *EXPECTED_STATE_UPDATE0);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::QueryContractExistance(contract_hashes, sender) => {
@@ -1564,7 +1587,7 @@ mod tests {
                         assert_eq!(compressed_contract.hash, *CONTRACT1_HASH);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, mut state_update, _) => {
-                    assert_eq!(block, *BLOCK1);
+                    assert_eq!(*block, *BLOCK1);
                     assert_eq!(state_update.deployed_contracts, vec![
                         state::sync::DeployedContract {
                             address: *CONTRACT1_ADDR,
@@ -1583,12 +1606,12 @@ mod tests {
                     assert_eq!(tail, BLOCK1_NUMBER);
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block1_v2);
+                    assert_eq!(*block, block1_v2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });
                 assert_matches!(rx_event.recv().await.unwrap(), Event::Update(block, state_update, _) => {
-                    assert_eq!(block, block2);
+                    assert_eq!(*block, block2);
                     assert!(state_update.deployed_contracts.is_empty());
                     assert!(state_update.contract_updates.is_empty());
                 });

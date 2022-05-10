@@ -1,13 +1,24 @@
 use anyhow::Context;
 use pathfinder_lib::{
-    cairo,
-    config::{self, EthereumConfig},
-    ethereum, rpc, sequencer, state,
+    cairo, config,
+    ethereum::{
+        self,
+        transport::{EthereumTransport, HttpTransport},
+    },
+    rpc, sequencer, state,
     storage::Storage,
 };
 use std::sync::Arc;
 use tracing::info;
-use web3::{transports::Http, Web3};
+
+use std::{net::SocketAddr};
+use std::convert::Infallible;
+use hyper::{Body, Request, Response, Server};
+use hyper::service::{make_service_fn, service_fn};
+
+async fn healthz(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    Ok(Response::new(Body::from("ok")))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,20 +36,21 @@ async fn main() -> anyhow::Result<()> {
         version = env!("VERGEN_GIT_SEMVER_LIGHTWEIGHT"),
         "🏁 Starting node."
     );
-    let eth_transport = ethereum_transport(config.ethereum)
-        .await
-        .context("Creating Ethereum transport")?;
+    let eth_transport =
+        HttpTransport::from_config(config.ethereum).context("Creating Ethereum transport")?;
 
-    let network_chain = ethereum::chain(&eth_transport)
+    let network_chain = eth_transport
+        .chain()
         .await
         .context("Determining Ethereum chain")?;
 
-    let database_path = match network_chain {
+    let database_path = config.data_directory.join(match network_chain {
         ethereum::Chain::Mainnet => "mainnet.sqlite",
         ethereum::Chain::Goerli => "goerli.sqlite",
-    };
+    });
+    let storage = Storage::migrate(database_path.clone()).unwrap();
+    info!(location=?database_path, "Database migrated.");
 
-    let storage = Storage::migrate(database_path.into()).unwrap();
     let sequencer = sequencer::Client::new(network_chain).unwrap();
     let sync_state = Arc::new(state::SyncState::default());
 
@@ -71,6 +83,21 @@ async fn main() -> anyhow::Result<()> {
         rpc::run_server(config.http_rpc_addr, api).context("Starting the RPC server")?;
     info!("📡 HTTP-RPC server started on: {}", local_addr);
 
+    let addr2 = SocketAddr::from(([0, 0, 0, 0], 8080));
+
+    let make_svc = make_service_fn(|_conn| {
+        // This is the `Service` that will handle the connection.
+        // `service_fn` is a helper to convert a function that
+        // returns a Response into a `Service`.
+        async { Ok::<_, Infallible>(service_fn(healthz)) }
+    });
+
+    let srv2 = Server::bind(&addr2).serve(make_svc);
+
+    info!("📡 Health server started on: {}", addr2);
+
+    tokio::spawn(srv2);
+
     let update_handle = tokio::spawn(pathfinder_lib::update::poll_github_for_releases());
 
     // Monitor our spawned process tasks.
@@ -100,30 +127,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Creates an [Ethereum transport](Web3<Http>) from the configuration.
-///
-/// This includes setting:
-/// - the [Url](reqwest::Url)
-/// - the user-agent (if provided)
-/// - the password (if provided)
-async fn ethereum_transport(config: EthereumConfig) -> anyhow::Result<Web3<Http>> {
-    let client = reqwest::Client::builder();
-    let client = match config.user_agent {
-        Some(user_agent) => client.user_agent(user_agent),
-        None => client,
-    }
-    .build()
-    .context("Creating HTTP client")?;
-
-    let mut url = config.url;
-    url.set_password(config.password.as_deref())
-        .map_err(|_| anyhow::anyhow!("Setting password"))?;
-
-    let client = Http::with_client(client, url);
-
-    Ok(Web3::new(client))
 }
 
 #[cfg(feature = "tokio-console")]

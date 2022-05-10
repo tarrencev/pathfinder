@@ -2,11 +2,14 @@
 
 use crate::core::{
     CallParam, CallSignatureElem, ConstructorParam, EthereumAddress, EventData, EventKey, Fee,
-    L1ToL2MessagePayloadElem, L2ToL1MessagePayloadElem, TransactionSignatureElem,
+    GasPrice, L1ToL2MessagePayloadElem, L2ToL1MessagePayloadElem, StarknetBlockNumber,
+    TransactionSignatureElem, TransactionVersion,
 };
 use num_bigint::BigUint;
 use pedersen::{HexParseError, OverflowError, StarkHash};
-use serde_with::serde_conv;
+use serde::de::Visitor;
+use serde_with::{serde_conv, DeserializeAs, SerializeAs};
+use std::borrow::Cow;
 use std::str::FromStr;
 use web3::types::{H128, H160, H256};
 
@@ -66,25 +69,224 @@ serde_conv!(
     |s: &str| starkhash_from_dec_str(s).map(TransactionSignatureElem)
 );
 
-serde_with::serde_conv!(
-    pub EthereumAddressAsHexStr,
-    EthereumAddress,
-    |serialize_me: &EthereumAddress| bytes_to_hex_str(serialize_me.0.as_bytes()),
-    |s: &str| bytes_from_hex_str::<{ H160::len_bytes() }>(s).map(|b| EthereumAddress(H160::from(b)))
-);
+pub struct EthereumAddressAsHexStr;
+
+impl SerializeAs<EthereumAddress> for EthereumAddressAsHexStr {
+    fn serialize_as<S>(source: &EthereumAddress, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // EthereumAddress is "0x" + 40 digits at most
+        let mut buf = [0u8; 2 + 40];
+        let s = bytes_as_hex_str(source.0.as_bytes(), &mut buf);
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> DeserializeAs<'de, EthereumAddress> for EthereumAddressAsHexStr {
+    fn deserialize_as<D>(deserializer: D) -> Result<EthereumAddress, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EthereumAddressVisitor;
+
+        impl<'de> Visitor<'de> for EthereumAddressVisitor {
+            type Value = EthereumAddress;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string of up to 40 digits with an optional '0x' prefix")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                bytes_from_hex_str::<{ H160::len_bytes() }>(v)
+                    .map_err(serde::de::Error::custom)
+                    .map(|b| EthereumAddress(H160::from(b)))
+            }
+        }
+
+        deserializer.deserialize_str(EthereumAddressVisitor)
+    }
+}
+
+pub struct H256AsNoLeadingZerosHexStr;
+
+impl SerializeAs<H256> for H256AsNoLeadingZerosHexStr {
+    fn serialize_as<S>(source: &H256, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // H256 is "0x" + 64 digits at most
+        let mut buf = [0u8; 2 + 64];
+        let s = bytes_as_hex_str(source.as_bytes(), &mut buf);
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> DeserializeAs<'de, H256> for H256AsNoLeadingZerosHexStr {
+    fn deserialize_as<D>(deserializer: D) -> Result<H256, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct H256Visitor;
+
+        impl<'de> Visitor<'de> for H256Visitor {
+            type Value = H256;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string of up to 64 digits with an optional '0x' prefix")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                bytes_from_hex_str::<{ H256::len_bytes() }>(v)
+                    .map_err(serde::de::Error::custom)
+                    .map(H256::from)
+            }
+        }
+
+        deserializer.deserialize_str(H256Visitor)
+    }
+}
+
+pub struct FeeAsHexStr;
+
+impl SerializeAs<Fee> for FeeAsHexStr {
+    fn serialize_as<S>(source: &Fee, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Fee is "0x" + 32 digits at most
+        let mut buf = [0u8; 2 + 32];
+        let s = bytes_as_hex_str(source.0.as_bytes(), &mut buf);
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> DeserializeAs<'de, Fee> for FeeAsHexStr {
+    fn deserialize_as<D>(deserializer: D) -> Result<Fee, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FeeVisitor;
+
+        impl<'de> Visitor<'de> for FeeVisitor {
+            type Value = Fee;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string of up to 32 digits with an optional '0x' prefix")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                bytes_from_hex_str::<{ H128::len_bytes() }>(v)
+                    .map_err(serde::de::Error::custom)
+                    .map(|b| Fee(H128::from(b)))
+            }
+        }
+
+        deserializer.deserialize_str(FeeVisitor)
+    }
+}
+
+pub struct GasPriceAsHexStr;
+
+impl SerializeAs<GasPrice> for GasPriceAsHexStr {
+    fn serialize_as<S>(source: &GasPrice, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // GasPrice is "0x" + 32 digits at most
+        let mut buf = [0u8; 2 + 32];
+        let bytes = source.0.to_be_bytes();
+        let s = bytes_as_hex_str(&bytes, &mut buf);
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> DeserializeAs<'de, GasPrice> for GasPriceAsHexStr {
+    fn deserialize_as<D>(deserializer: D) -> Result<GasPrice, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct GasPriceVisitor;
+
+        impl<'de> Visitor<'de> for GasPriceVisitor {
+            type Value = GasPrice;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string of up to 32 digits with an optional '0x' prefix")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                bytes_from_hex_str::<16>(v)
+                    .map_err(serde::de::Error::custom)
+                    .map(GasPrice::from_be_bytes)
+            }
+        }
+
+        deserializer.deserialize_str(GasPriceVisitor)
+    }
+}
+
+pub struct StarknetBlockNumberAsHexStr;
+
+impl SerializeAs<StarknetBlockNumber> for StarknetBlockNumberAsHexStr {
+    fn serialize_as<S>(source: &StarknetBlockNumber, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = source.0.to_be_bytes();
+        // StarknetBlockNumber is "0x" + 16 digits at most
+        let mut buf = [0u8; 2 + 16];
+        let s = bytes_as_hex_str(&bytes, &mut buf);
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> DeserializeAs<'de, StarknetBlockNumber> for StarknetBlockNumberAsHexStr {
+    fn deserialize_as<D>(deserializer: D) -> Result<StarknetBlockNumber, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StarknetBlockNumberVisitor;
+
+        impl<'de> Visitor<'de> for StarknetBlockNumberVisitor {
+            type Value = StarknetBlockNumber;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string of up to 16 digits with an optional '0x' prefix")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let stripped = v.strip_prefix("0x").unwrap_or(v);
+                u64::from_str_radix(stripped, 16)
+                    .map_err(serde::de::Error::custom)
+                    .map(StarknetBlockNumber)
+            }
+        }
+
+        deserializer.deserialize_str(StarknetBlockNumberVisitor)
+    }
+}
 
 serde_with::serde_conv!(
-    pub H256AsNoLeadingZerosHexStr,
-    H256,
-    |serialize_me: &H256| bytes_to_hex_str(serialize_me.as_bytes()),
-    |s: &str| bytes_from_hex_str::<{ H256::len_bytes() }>(s).map(H256::from)
-);
-
-serde_with::serde_conv!(
-    pub FeeAsHexStr,
-    Fee,
-    |serialize_me: &Fee| bytes_to_hex_str(serialize_me.0.as_bytes()),
-    |s: &str| bytes_from_hex_str::<{ H128::len_bytes() }>(s).map(|b| Fee(H128::from(b)))
+    pub TransactionVersionAsHexStr,
+    TransactionVersion,
+    |serialize_me: &TransactionVersion| bytes_to_hex_str(serialize_me.0.as_bytes()),
+    |s: &str| bytes_from_hex_str::<{ H256::len_bytes() }>(s).map(|b| TransactionVersion(H256::from(b)))
 );
 
 /// A helper conversion function. Only use with __sequencer API related types__.
@@ -153,22 +355,27 @@ fn bytes_from_hex_str<const N: usize>(hex_str: &str) -> Result<[u8; N], HexParse
     Ok(buf)
 }
 
-/// A convenience function which produces a "0x" prefixed hex string from a byte slice.
-pub(crate) fn bytes_to_hex_str(bytes: &[u8]) -> String {
-    if !bytes.iter().any(|b| *b != 0) {
-        return "0x0".to_string();
-    }
-
-    const LUT: [u8; 16] = *b"0123456789abcdef";
-
+/// The first stage of conversion - skip leading zeros
+fn skip_zeros(bytes: &[u8]) -> (impl Iterator<Item = &u8>, usize, usize) {
     // Skip all leading zero bytes
     let it = bytes.iter().skip_while(|&&b| b == 0);
     let num_bytes = it.clone().count();
     let skipped = bytes.len() - num_bytes;
     // The first high nibble can be 0
     let start = if bytes[skipped] < 0x10 { 1 } else { 2 };
+    // Number of characters to display
     let len = start + num_bytes * 2;
-    let mut buf = vec![0; len];
+    (it, start, len)
+}
+
+/// The second stage of conversion - map bytes to hex str
+fn it_to_hex_str<'a>(
+    it: impl Iterator<Item = &'a u8>,
+    start: usize,
+    len: usize,
+    buf: &'a mut [u8],
+) -> &'a [u8] {
+    const LUT: [u8; 16] = *b"0123456789abcdef";
     buf[0] = b'0';
     // Same small lookup table is ~25% faster than hex::encode_from_slice 🤷
     it.enumerate().for_each(|(i, &b)| {
@@ -178,9 +385,42 @@ pub(crate) fn bytes_to_hex_str(bytes: &[u8]) -> String {
         buf[pos..pos + 2].copy_from_slice(&x);
     });
     buf[1] = b'x';
+    &buf[..len]
+}
 
+/// A convenience function which produces a "0x" prefixed hex str slice in a given buffer `buf`
+/// from an array of bytes.
+/// Panics if `bytes.len() * 2 + 2 > buf.len()`
+fn bytes_as_hex_str<'a>(bytes: &'a [u8], buf: &'a mut [u8]) -> &'a str {
+    let expected_buf_len = bytes.len() * 2 + 2;
+    assert!(
+        buf.len() >= expected_buf_len,
+        "buffer size is {}, expected at least {}",
+        buf.len(),
+        expected_buf_len
+    );
+
+    if !bytes.iter().any(|b| *b != 0) {
+        return "0x0";
+    }
+
+    let (it, start, len) = skip_zeros(bytes);
+    let res = it_to_hex_str(it, start, len, buf);
+    // Unwrap is safe because `buf` holds valid UTF8 characters.
+    std::str::from_utf8(res).unwrap()
+}
+
+/// A convenience function which produces a "0x" prefixed hex string from a [StarkHash].
+#[allow(dead_code)]
+fn bytes_to_hex_str(bytes: &[u8]) -> Cow<'static, str> {
+    if !bytes.iter().any(|b| *b != 0) {
+        return Cow::from("0x0");
+    }
+    let (it, start, len) = skip_zeros(bytes);
+    let mut buf = vec![0u8; len];
+    it_to_hex_str(it, start, len, &mut buf);
     // Unwrap is safe as the buffer contains valid utf8
-    String::from_utf8(buf).unwrap()
+    String::from_utf8(buf).unwrap().into()
 }
 
 #[cfg(test)]
@@ -201,9 +441,11 @@ mod tests {
         assert_eq!(expected, b);
         assert_eq!(starkhash_to_dec_str(&expected), ZERO_DEC_STR);
 
-        let c: [u8; 32] = bytes_from_hex_str(ZERO_HEX_STR).unwrap();
+        let c: [u8; 1] = bytes_from_hex_str(ZERO_HEX_STR).unwrap();
         assert!(c.iter().all(|x| *x == 0));
         assert_eq!(bytes_to_hex_str(&c[..]), ZERO_HEX_STR);
+        let mut buf = [0u8; 2 + 2];
+        assert_eq!(bytes_as_hex_str(&c[..], &mut buf), ZERO_HEX_STR);
     }
 
     #[test]
@@ -222,6 +464,8 @@ mod tests {
         let c: [u8; 8] = bytes_from_hex_str(ODD_HEX_STR).unwrap();
         assert_eq!(c, ODD_BYTES);
         assert_eq!(bytes_to_hex_str(&c[..]), ODD_HEX_STR);
+        let mut buf = [0u8; 2 + 16];
+        assert_eq!(bytes_as_hex_str(&c[..], &mut buf), ODD_HEX_STR);
     }
 
     #[test]
@@ -240,6 +484,8 @@ mod tests {
         let c: [u8; 8] = bytes_from_hex_str(EVEN_HEX_STR).unwrap();
         assert_eq!(c, EVEN_BYTES);
         assert_eq!(bytes_to_hex_str(&c[..]), EVEN_HEX_STR);
+        let mut buf = [0u8; 2 + 16];
+        assert_eq!(bytes_as_hex_str(&c[..], &mut buf), EVEN_HEX_STR);
     }
 
     #[test]
@@ -263,6 +509,15 @@ mod tests {
         let c: [u8; 32] = bytes_from_hex_str(MAX_HEX_STR).unwrap();
         assert_eq!(c, MAX_BYTES);
         assert_eq!(bytes_to_hex_str(&c[..]), MAX_HEX_STR);
+        let mut buf = [0u8; 2 + 64];
+        assert_eq!(bytes_as_hex_str(&c[..], &mut buf), MAX_HEX_STR);
+    }
+
+    #[test]
+    #[should_panic]
+    fn buffer_too_small() {
+        let mut buf = [0u8; 2 + 1];
+        bytes_as_hex_str(&[0u8], &mut buf);
     }
 
     #[test]
@@ -336,5 +591,43 @@ mod tests {
             bytes_from_hex_str::<32>("0x123z"),
             Err(HexParseError::InvalidNibble(b'z'))
         );
+    }
+
+    mod block_number_as_hex_str {
+        #[serde_with::serde_as]
+        #[derive(Debug, Copy, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+        struct BlockNum(
+            #[serde_as(as = "super::StarknetBlockNumberAsHexStr")] crate::core::StarknetBlockNumber,
+        );
+
+        impl BlockNum {
+            pub fn new(v: u64) -> Self {
+                Self(crate::core::StarknetBlockNumber(v))
+            }
+        }
+
+        #[test]
+        fn deserialize() {
+            // u64::from_str_radix does not accept the `0x` prefix, so also make sure it is stripped
+            ["", "0x"].into_iter().for_each(|prefix| {
+                assert_eq!(
+                    serde_json::from_str::<BlockNum>(&format!("\"{prefix}0\"")).unwrap(),
+                    BlockNum::new(0)
+                );
+                assert_eq!(
+                    serde_json::from_str::<BlockNum>(&format!("\"{prefix}123\"")).unwrap(),
+                    BlockNum::new(0x123)
+                );
+                assert_eq!(
+                    serde_json::from_str::<BlockNum>(&format!("\"{prefix}1234\"")).unwrap(),
+                    BlockNum::new(0x1234)
+                );
+                assert_eq!(
+                    serde_json::from_str::<BlockNum>(&format!("\"{prefix}ffffffffffffffff\""))
+                        .unwrap(),
+                    BlockNum::new(u64::MAX)
+                );
+            });
+        }
     }
 }

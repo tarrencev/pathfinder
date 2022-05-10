@@ -71,12 +71,6 @@ pub async fn poll_github_for_releases() -> anyhow::Result<()> {
 /// - [USER_AGENT](https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required)
 fn configure_client() -> anyhow::Result<reqwest::Client> {
     use anyhow::Context;
-    const USER_AGENT: &str = concat!(
-        env!("CARGO_PKG_NAME"),
-        "/",
-        env!("VERGEN_GIT_SEMVER_LIGHTWEIGHT")
-    );
-
     let mut headers = reqwest::header::HeaderMap::new();
     // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#current-version
     headers.insert(
@@ -87,7 +81,7 @@ fn configure_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .default_headers(headers)
         // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required
-        .user_agent(USER_AGENT)
+        .user_agent(crate::consts::USER_AGENT)
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .context("Failed to create Github client")
@@ -97,7 +91,7 @@ fn configure_client() -> anyhow::Result<reqwest::Client> {
 struct Release {
     version: String,
     /// Optional because its possible to have an invalid string ETag header.
-    etag: Option<String>,
+    etag: Option<reqwest::header::HeaderValue>,
 }
 
 #[derive(Debug)]
@@ -117,7 +111,7 @@ enum UpdateResult {
 /// resulting 304 status code is mapped to [UpdateResult::NotModified].
 async fn fetch_latest_github_release(
     client: &reqwest::Client,
-    etag: &Option<String>,
+    etag: &Option<reqwest::header::HeaderValue>,
 ) -> UpdateResult {
     use reqwest::StatusCode;
     use reqwest::Url;
@@ -142,15 +136,7 @@ async fn fetch_latest_github_release(
                 name: String,
             }
 
-            let etag = result
-                .headers()
-                .get(reqwest::header::ETAG)
-                // Its technically allowed to have non-valid ascii data in the header,
-                // in which case we can't do anything except set etag=None.
-                .map(|h| h.to_str())
-                .transpose()
-                .unwrap_or_default()
-                .map(|s| s.to_string());
+            let etag = result.headers().get(reqwest::header::ETAG).cloned();
 
             match result.json::<JsonRelease>().await {
                 Ok(r) => UpdateResult::Update(Release {

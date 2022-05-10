@@ -3,9 +3,15 @@ pub mod error;
 pub mod reply;
 pub mod request;
 
-use self::error::StarknetError;
+use self::{
+    error::StarknetError,
+    request::{add_transaction::ContractDefinition, Call},
+};
 use crate::{
-    core::{ContractAddress, StarknetTransactionHash, StorageAddress, StorageValue},
+    core::{
+        ConstructorParam, ContractAddress, ContractAddressSalt, Fee, StarknetTransactionHash,
+        StorageAddress, StorageValue, TransactionVersion,
+    },
     ethereum::Chain,
     rpc::types::{BlockHashOrTag, BlockNumberOrTag, Tag},
     sequencer::error::SequencerError,
@@ -65,9 +71,32 @@ pub trait ClientApi {
     ) -> Result<reply::StateUpdate, SequencerError>;
 
     async fn eth_contract_addresses(&self) -> Result<reply::EthContractAddresses, SequencerError>;
+
+    async fn add_invoke_transaction(
+        &self,
+        function_invocation: Call,
+        max_fee: Fee,
+        version: TransactionVersion,
+    ) -> Result<reply::add_transaction::InvokeResponse, SequencerError>;
+
+    async fn add_deploy_transaction(
+        &self,
+        contract_address_salt: ContractAddressSalt,
+        constructor_calldata: Vec<ConstructorParam>,
+        contract_definition: ContractDefinition,
+    ) -> Result<reply::add_transaction::DeployResponse, SequencerError>;
 }
 
 /// StarkNet sequencer client using REST API.
+///
+/// Retry is performed on __all__ types of errors __except for__
+/// [StarkNet specific errors](crate::sequencer::error::StarknetError).
+///
+/// Initial backoff time is 30 seconds and saturates at 1 hour:
+///
+/// `backoff [secs] = min((2 ^ N) * 15, 3600) [secs]`
+///
+/// where `N` is the consecutive retry iteration number `{1, 2, ...}`.
 #[derive(Debug, Clone)]
 pub struct Client {
     /// This client is internally refcounted
@@ -79,7 +108,7 @@ pub struct Client {
 /// Helper function which simplifies the handling of optional block hashes in queries.
 fn block_hash_str(hash: BlockHashOrTag) -> (&'static str, Cow<'static, str>) {
     match hash {
-        BlockHashOrTag::Hash(h) => ("blockHash", Cow::from(h.0.to_hex_str())),
+        BlockHashOrTag::Hash(h) => ("blockHash", h.0.to_hex_str()),
         BlockHashOrTag::Tag(Tag::Latest) => ("blockNumber", Cow::from("null")),
         BlockHashOrTag::Tag(Tag::Pending) => ("blockNumber", Cow::from("pending")),
     }
@@ -120,8 +149,6 @@ async fn parse_raw(resp: reqwest::Response) -> Result<reqwest::Response, Sequenc
 }
 
 /// Wrapper function to allow retrying sequencer queries in an exponential manner.
-///
-/// Initial backoff time is 2 seconds. Retrying stops after approximately 4 minutes in total.
 async fn retry<T, Fut, FutureFactory>(future_factory: FutureFactory) -> Result<T, SequencerError>
 where
     Fut: Future<Output = Result<T, SequencerError>>,
@@ -129,29 +156,42 @@ where
 {
     use crate::retry::Retry;
     use reqwest::StatusCode;
-    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::num::NonZeroU64;
+    use tracing::{debug, error, info, warn};
 
     Retry::exponential(future_factory, NonZeroU64::new(2).unwrap())
-        // Max number of retries of 7 gives a total accumulated timeout of 4 minutes and 15 seconds (2^8-1)
-        .max_num_retries(NonZeroUsize::new(7).unwrap())
+        .factor(NonZeroU64::new(15).unwrap())
+        .max_delay(Duration::from_secs(60 * 60))
         .when(|e| match e {
-            SequencerError::TransportError(te) if te.is_timeout() => {
-                tracing::debug!("Retrying due to timeout");
+            SequencerError::ReqwestError(e) => {
+                if e.is_body() || e.is_connect() || e.is_timeout() {
+                    info!(reason=%e, "Request failed, retrying");
+                } else if e.is_status() {
+                    match e.status() {
+                        Some(
+                            StatusCode::NOT_FOUND
+                            | StatusCode::TOO_MANY_REQUESTS
+                            | StatusCode::BAD_GATEWAY
+                            | StatusCode::SERVICE_UNAVAILABLE
+                            | StatusCode::GATEWAY_TIMEOUT,
+                        ) => {
+                            debug!(reason=%e, "Request failed, retrying");
+                        }
+                        Some(StatusCode::INTERNAL_SERVER_ERROR) => {
+                            error!(reason=%e, "Request failed, retrying");
+                        }
+                        Some(_) => warn!(reason=%e, "Request failed, retrying"),
+                        None => unreachable!(),
+                    }
+                } else if e.is_decode() {
+                    error!(reason=%e, "Request failed, retrying");
+                } else {
+                    warn!(reason=%e, "Request failed, retrying");
+                }
+
                 true
             }
-            SequencerError::TransportError(te) => match te.status() {
-                Some(
-                    status @ (StatusCode::TOO_MANY_REQUESTS
-                    | StatusCode::BAD_GATEWAY
-                    | StatusCode::SERVICE_UNAVAILABLE
-                    | StatusCode::GATEWAY_TIMEOUT),
-                ) => {
-                    tracing::debug!("Retrying due to {status}");
-                    true
-                }
-                Some(_) | None => false,
-            },
-            _ => false,
+            SequencerError::StarknetError(_) => false,
         })
         .await
 }
@@ -169,29 +209,22 @@ impl Client {
 
     /// Create a Sequencer client for the given [Url].
     fn with_url(url: Url) -> reqwest::Result<Self> {
-        // Resolves to "pathfinder/<version_info>"
-        const USER_AGENT: &str = concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("VERGEN_GIT_SEMVER_LIGHTWEIGHT")
-        );
-
         Ok(Self {
             inner: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
-                .user_agent(USER_AGENT)
+                .user_agent(crate::consts::USER_AGENT)
                 .build()?,
             sequencer_url: url,
         })
     }
 
     /// Helper function that constructs a URL for particular query.
-    fn build_query(&self, path_segment: &str, params: &[(&str, &str)]) -> Url {
+    fn build_query(&self, path_segments: &[&str], params: &[(&str, &str)]) -> Url {
         let mut query_url = self.sequencer_url.clone();
         query_url
             .path_segments_mut()
             .expect("Base URL is valid")
-            .extend(&["feeder_gateway", path_segment]);
+            .extend(path_segments);
         query_url.query_pairs_mut().extend_pairs(params);
         tracing::trace!(%query_url);
         query_url
@@ -210,7 +243,10 @@ impl ClientApi for Client {
         retry(|| async {
             let resp = self
                 .inner
-                .get(self.build_query("get_block", &[("blockNumber", &number)]))
+                .get(self.build_query(
+                    &["feeder_gateway", "get_block"],
+                    &[("blockNumber", &number)],
+                ))
                 .send()
                 .await?;
             parse::<reply::Block>(resp).await
@@ -228,7 +264,7 @@ impl ClientApi for Client {
         retry(|| async {
             let resp = self
                 .inner
-                .get(self.build_query("get_block", &[(tag, &hash)]))
+                .get(self.build_query(&["feeder_gateway", "get_block"], &[(tag, &hash)]))
                 .send()
                 .await?;
             parse::<reply::Block>(resp).await
@@ -247,7 +283,7 @@ impl ClientApi for Client {
         retry(|| async {
             let resp = self
                 .inner
-                .post(self.build_query("call_contract", &[(tag, &hash)]))
+                .post(self.build_query(&["feeder_gateway", "call_contract"], &[(tag, &hash)]))
                 .json(&payload)
                 .send()
                 .await?;
@@ -266,7 +302,7 @@ impl ClientApi for Client {
             let resp = self
                 .inner
                 .get(self.build_query(
-                    "get_full_contract",
+                    &["feeder_gateway", "get_full_contract"],
                     &[("contractAddress", &contract_addr.0.to_hex_str())],
                 ))
                 .send()
@@ -293,7 +329,7 @@ impl ClientApi for Client {
             let resp = self
                 .inner
                 .get(self.build_query(
-                    "get_storage_at",
+                    &["feeder_gateway", "get_storage_at"],
                     &[
                         ("contractAddress", &contract_addr.0.to_hex_str()),
                         ("key", &starkhash_to_dec_str(&key.0)),
@@ -317,7 +353,7 @@ impl ClientApi for Client {
             let resp = self
                 .inner
                 .get(self.build_query(
-                    "get_transaction",
+                    &["feeder_gateway", "get_transaction"],
                     &[("transactionHash", &transaction_hash.0.to_hex_str())],
                 ))
                 .send()
@@ -337,7 +373,7 @@ impl ClientApi for Client {
             let resp = self
                 .inner
                 .get(self.build_query(
-                    "get_transaction_status",
+                    &["feeder_gateway", "get_transaction_status"],
                     &[("transactionHash", &transaction_hash.0.to_hex_str())],
                 ))
                 .send()
@@ -357,7 +393,7 @@ impl ClientApi for Client {
         retry(|| async {
             let resp = self
                 .inner
-                .get(self.build_query("get_state_update", &[(tag, &hash)]))
+                .get(self.build_query(&["feeder_gateway", "get_state_update"], &[(tag, &hash)]))
                 .send()
                 .await?;
             parse(resp).await
@@ -375,7 +411,7 @@ impl ClientApi for Client {
             let resp = self
                 .inner
                 .get(self.build_query(
-                    "get_state_update",
+                    &["feeder_gateway", "get_state_update"],
                     &[("blockNumber", &block_number_str(block_number))],
                 ))
                 .send()
@@ -391,12 +427,71 @@ impl ClientApi for Client {
         retry(|| async {
             let resp = self
                 .inner
-                .get(self.build_query("get_contract_addresses", &[]))
+                .get(self.build_query(&["feeder_gateway", "get_contract_addresses"], &[]))
                 .send()
                 .await?;
             parse(resp).await
         })
         .await
+    }
+
+    /// Adds a transaction invoking a contract.
+    #[tracing::instrument(skip(self))]
+    async fn add_invoke_transaction(
+        &self,
+        call: Call,
+        max_fee: Fee,
+        version: TransactionVersion,
+    ) -> Result<reply::add_transaction::InvokeResponse, SequencerError> {
+        let req = request::add_transaction::AddTransaction::Invoke(
+            request::add_transaction::InvokeFunction {
+                contract_address: call.contract_address,
+                entry_point_selector: call.entry_point_selector,
+                calldata: call.calldata,
+                max_fee,
+                version,
+                signature: call.signature,
+            },
+        );
+
+        // Note that we don't do retries here.
+        // This method is used to proxy an add transaction operation from the JSON-RPC
+        // API to the sequencer. Retries should be implemented in the JSON-RPC
+        // client instead.
+        let resp = self
+            .inner
+            .post(self.build_query(&["gateway", "add_transaction"], &[]))
+            .json(&req)
+            .send()
+            .await?;
+        parse(resp).await
+    }
+
+    /// Deploys a contract.
+    #[tracing::instrument(skip(self, contract_definition))]
+    async fn add_deploy_transaction(
+        &self,
+        contract_address_salt: ContractAddressSalt,
+        constructor_calldata: Vec<ConstructorParam>,
+        contract_definition: ContractDefinition,
+    ) -> Result<reply::add_transaction::DeployResponse, SequencerError> {
+        let req =
+            request::add_transaction::AddTransaction::Deploy(request::add_transaction::Deploy {
+                contract_address_salt,
+                contract_definition,
+                constructor_calldata,
+            });
+        // Note that we don't do retries here.
+        // This method is used to proxy an add transaction operation from the JSON-RPC
+        // API to the sequencer. Retries should be implemented in the JSON-RPC
+        // client instead.
+        let resp = self
+            .inner
+            .post(self.build_query(&["gateway", "add_transaction"], &[]))
+            .json(&req)
+            .send()
+            .await?;
+        parse(resp).await
     }
 }
 
@@ -464,10 +559,11 @@ mod tests {
         Client::new(Chain::Goerli).unwrap()
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn client_user_agent() {
+        use crate::core::StarknetBlockTimestamp;
+        use crate::sequencer::reply::{Block, Status};
         use std::convert::Infallible;
-
         use warp::Filter;
 
         let filter = warp::header::optional("user-agent").and_then(
@@ -475,10 +571,21 @@ mod tests {
                 let user_agent = user_agent.expect("user-agent set");
                 let (name, version) = user_agent.split_once('/').unwrap();
 
-                assert_eq!(name, "pathfinder");
+                assert_eq!(name, "starknet-pathfinder");
                 assert_eq!(version, env!("VERGEN_GIT_SEMVER_LIGHTWEIGHT"));
 
-                Result::<_, Infallible>::Ok("")
+                Ok::<_, Infallible>(warp::reply::json(&Block {
+                    block_hash: None,
+                    block_number: None,
+                    gas_price: None,
+                    parent_block_hash: StarknetBlockHash(StarkHash::ZERO),
+                    sequencer_address: None,
+                    state_root: None,
+                    status: Status::NotReceived,
+                    timestamp: StarknetBlockTimestamp(0),
+                    transaction_receipts: vec![],
+                    transactions: vec![],
+                }))
             },
         );
 
@@ -1085,6 +1192,231 @@ mod tests {
         client().eth_contract_addresses().await.unwrap();
     }
 
+    mod add_transaction {
+        use std::collections::HashMap;
+
+        use super::*;
+        use crate::{
+            core::{ByteCodeOffset, CallParam, CallSignatureElem, EntryPoint},
+            sequencer::request::contract::{EntryPointType, SelectorAndOffset},
+        };
+
+        use web3::types::H256;
+
+        #[tokio::test]
+        async fn invalid_entry_point_selector() {
+            // test with values dumped from `starknet invoke` for a test contract, except for
+            // an invalid entry point value
+            let  error = client()
+                .add_invoke_transaction(
+                    Call {
+                        contract_address: ContractAddress(
+                            StarkHash::from_hex_str(
+                                "0x23371b227eaecd8e8920cd429357edddd2cd0f3fee6abaacca08d3ab82a7cdd",
+                            )
+                            .unwrap(),
+                        ),
+                        calldata: vec![
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(
+                                StarkHash::from_hex_str(
+                                    "0x677bb1cdc050e8d63855e8743ab6e09179138def390676cc03c484daf112ba1",
+                                )
+                                .unwrap(),
+                            ),
+                            CallParam(
+                                StarkHash::from_hex_str(
+                                    "0x362398bec32bc0ebb411203221a35a0301193a96f317ebe5e40be9f60d15320",
+                                )
+                                .unwrap(),
+                            ),
+                            CallParam(StarkHash::ZERO),
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(StarkHash::from_hex_str("0x2b").unwrap()),
+                            CallParam(StarkHash::ZERO),
+                        ],
+                        entry_point_selector: EntryPoint(StarkHash::ZERO),
+                        signature: vec![
+                            CallSignatureElem(
+                                StarkHash::from_hex_str(
+                                    "0x7dd3a55d94a0de6f3d6c104d7e6c88ec719a82f4e2bbc12587c8c187584d3d5"
+                                )
+                                .unwrap(),
+                            ),
+                            CallSignatureElem(
+                                StarkHash::from_hex_str(
+                                    "0x71456dded17015d1234779889d78f3e7c763ddcfd2662b19e7843c7542614f8"
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                    },
+                    Fee(5444010076217u128.to_be_bytes().into()),
+                    TransactionVersion(H256::zero()),
+                )
+                .await
+                .unwrap_err();
+            assert_matches!(
+                error,
+                SequencerError::StarknetError(e) => assert_eq!(e.code, StarknetErrorCode::UnsupportedSelectorForFee)
+            );
+        }
+
+        #[tokio::test]
+        async fn invoke_function() {
+            // test with values dumped from `starknet invoke` for a test contract
+            client()
+                .add_invoke_transaction(
+                    Call {
+                        contract_address: ContractAddress(
+                            StarkHash::from_hex_str(
+                                "0x23371b227eaecd8e8920cd429357edddd2cd0f3fee6abaacca08d3ab82a7cdd",
+                            )
+                            .unwrap(),
+                        ),
+                        calldata: vec![
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(
+                                StarkHash::from_hex_str(
+                                    "0x677bb1cdc050e8d63855e8743ab6e09179138def390676cc03c484daf112ba1",
+                                )
+                                .unwrap(),
+                            ),
+                            CallParam(
+                                StarkHash::from_hex_str(
+                                    "0x362398bec32bc0ebb411203221a35a0301193a96f317ebe5e40be9f60d15320",
+                                )
+                                .unwrap(),
+                            ),
+                            CallParam(StarkHash::ZERO),
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(StarkHash::from_hex_str("0x1").unwrap()),
+                            CallParam(StarkHash::from_hex_str("0x2b").unwrap()),
+                            CallParam(StarkHash::ZERO),
+                        ],
+                        entry_point_selector: EntryPoint(
+                            StarkHash::from_hex_str(
+                                "0x15d40a3d6ca2ac30f4031e42be28da9b056fef9bb7357ac5e85627ee876e5ad",
+                            )
+                            .unwrap(),
+                        ),
+                        signature: vec![
+                            CallSignatureElem(
+                                StarkHash::from_hex_str(
+                                    "0x7dd3a55d94a0de6f3d6c104d7e6c88ec719a82f4e2bbc12587c8c187584d3d5",
+                                )
+                                .unwrap(),
+                            ),
+                            CallSignatureElem(
+                                StarkHash::from_hex_str(
+                                    "0x71456dded17015d1234779889d78f3e7c763ddcfd2662b19e7843c7542614f8",
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                    },
+                    Fee(5444010076217u128.to_be_bytes().into()),
+                    TransactionVersion(H256::zero()),
+                )
+                .await
+                .unwrap();
+        }
+
+        #[test]
+        fn test_program_is_valid_compressed_json() {
+            use flate2::write::GzDecoder;
+            use std::io::Write;
+
+            let json = include_bytes!("../resources/deploy_transaction.json");
+            let json: serde_json::Value = serde_json::from_slice(json).unwrap();
+            let program = json["contract_definition"]["program"].as_str().unwrap();
+            let gzipped_program = base64::decode(program).unwrap();
+
+            let mut decoder = GzDecoder::new(Vec::new());
+            decoder.write_all(&gzipped_program).unwrap();
+            let json = decoder.finish().unwrap();
+
+            let _contract: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        }
+
+        #[tokio::test]
+        async fn deploy_contract() {
+            // test with values dumped from `starknet deploy` for a test contract
+            let json = include_bytes!("../resources/deploy_transaction.json");
+            let json: serde_json::Value = serde_json::from_slice(json).unwrap();
+            let program = json["contract_definition"]["program"].as_str().unwrap();
+            let entry_points_by_type: HashMap<EntryPointType, Vec<SelectorAndOffset>> =
+                HashMap::from([
+                    (EntryPointType::Constructor, vec![]),
+                    (
+                        EntryPointType::External,
+                        vec![
+                            SelectorAndOffset {
+                                offset: ByteCodeOffset(StarkHash::from_hex_str("0x3a").unwrap()),
+                                selector: EntryPoint(StarkHash::from_hex_str(
+                                        "0x362398bec32bc0ebb411203221a35a0301193a96f317ebe5e40be9f60d15320",
+                                    )
+                                    .unwrap()
+                                ),
+                            },
+                            SelectorAndOffset{
+                                offset: ByteCodeOffset(StarkHash::from_hex_str("0x5b").unwrap()),
+                                selector: EntryPoint(StarkHash::from_hex_str(
+                                        "0x39e11d48192e4333233c7eb19d10ad67c362bb28580c604d67884c85da39695",
+                                    )
+                                    .unwrap()
+                                ),
+                            },
+                        ],
+                    ),
+                    (EntryPointType::L1Handler, vec![]),
+                ]);
+
+            client()
+                .add_deploy_transaction(
+                    ContractAddressSalt(
+                        StarkHash::from_hex_str(
+                            "0x5864b5e296c05028ac2bbc4a4c1378f56a3489d13e581f21d566bb94580f76d",
+                        )
+                        .unwrap(),
+                    ),
+                    vec![],
+                    ContractDefinition {
+                        abi: serde_json::json!([
+                            {
+                                "inputs": [
+                                    {
+                                        "name": "amount",
+                                        "type": "felt"
+                                    }
+                                ],
+                                "name": "increase_balance",
+                                "outputs": [],
+                                "type": "function"
+                            },
+                            {
+                                "inputs": [],
+                                "name": "get_balance",
+                                "outputs": [
+                                    {
+                                        "name": "res",
+                                        "type": "felt"
+                                    }
+                                ],
+                                "stateMutability": "view",
+                                "type": "function"
+                            }
+                        ]),
+                        program: program.to_owned(),
+                        entry_points_by_type,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
     mod retry {
         use super::{SequencerError, StarknetErrorCode};
         use assert_matches::assert_matches;
@@ -1094,7 +1426,6 @@ mod tests {
             collections::VecDeque, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration,
         };
         use tokio::{sync::Mutex, task::JoinHandle};
-        use tracing_test::traced_test;
         use warp::Filter;
 
         // A test helper
@@ -1131,8 +1462,7 @@ mod tests {
             (server_handle, addr)
         }
 
-        #[tokio::test]
-        #[traced_test]
+        #[test_log::test(tokio::test)]
         async fn stop_on_ok() {
             let statuses = VecDeque::from([
                 (StatusCode::TOO_MANY_REQUESTS, ""),
@@ -1157,8 +1487,7 @@ mod tests {
             assert_eq!(result, "Finally!");
         }
 
-        #[tokio::test]
-        #[traced_test]
+        #[test_log::test(tokio::test)]
         async fn stop_on_fatal() {
             let statuses = VecDeque::from([
                 (StatusCode::TOO_MANY_REQUESTS, ""),
@@ -1189,52 +1518,20 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        #[traced_test]
-        async fn stop_on_max_retry_count() {
-            let statuses = VecDeque::from([
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::BAD_GATEWAY, ""),
-                (StatusCode::GATEWAY_TIMEOUT, ""),
-                (StatusCode::SERVICE_UNAVAILABLE, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-                (StatusCode::TOO_MANY_REQUESTS, ""),
-            ]);
-
-            let (_jh, addr) = status_queue_server(statuses);
-            let error = super::retry(|| async {
-                let mut url = reqwest::Url::parse("http://localhost/").unwrap();
-                url.set_port(Some(addr.port())).unwrap();
-                let resp = reqwest::get(url).await?;
-                super::parse::<String>(resp).await
-            })
-            .await
-            .unwrap_err();
-            assert_matches!(
-                error,
-                SequencerError::TransportError(te) => assert_eq!(te.status(), Some(StatusCode::SERVICE_UNAVAILABLE))
-            );
-        }
-
-        #[tokio::test]
-        #[traced_test]
+        #[test_log::test(tokio::test)]
         async fn request_timeout() {
-            let (_jh, addr) = slow_server();
-            let timeout_counter = Arc::new(Mutex::new(0));
+            use std::sync::atomic::{AtomicUsize, Ordering};
 
-            let error = super::retry(|| async {
+            let (_jh, addr) = slow_server();
+            static CNT: AtomicUsize = AtomicUsize::new(0);
+
+            let fut = super::retry(|| async {
                 let mut url = reqwest::Url::parse("http://localhost/").unwrap();
                 url.set_port(Some(addr.port())).unwrap();
 
                 let client = reqwest::Client::builder().build().unwrap();
 
-                let mut cnt = timeout_counter.lock().await;
-                *cnt += 1;
+                CNT.fetch_add(1, Ordering::Relaxed);
 
                 // This is the same as using Client::builder().timeout()
                 let resp = client
@@ -1243,13 +1540,14 @@ mod tests {
                     .send()
                     .await?;
                 super::parse::<String>(resp).await
-            })
-            .await
-            .unwrap_err();
+            });
 
-            // Ultimately, after 7 retries a timeout error is returned
-            assert_matches!(error, SequencerError::TransportError(te) => assert!(te.is_timeout()));
-            assert_eq!(*timeout_counter.lock().await, 8);
+            // The retry loops forever, so wrap it in a timeout and check the counter.
+            tokio::time::timeout(Duration::from_millis(250), fut)
+                .await
+                .unwrap_err();
+            // 4th try should have timedout if this is really exponential backoff
+            assert_eq!(CNT.load(Ordering::Relaxed), 4);
         }
     }
 }

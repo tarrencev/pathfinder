@@ -119,11 +119,11 @@ pub mod reply {
     use super::request::BlockResponseScope;
     use crate::{
         core::{
-            CallParam, ContractAddress, EntryPoint, EventData, EventKey, GlobalRoot,
-            StarknetBlockHash, StarknetBlockNumber, StarknetBlockTimestamp,
+            CallParam, ContractAddress, EntryPoint, EventData, EventKey, GasPrice, GlobalRoot,
+            SequencerAddress, StarknetBlockHash, StarknetBlockNumber, StarknetBlockTimestamp,
             StarknetTransactionHash,
         },
-        rpc::api::RawBlock,
+        rpc::{api::RawBlock, serde::GasPriceAsHexStr},
         sequencer::reply as seq,
         sequencer::reply::Status as SeqStatus,
     };
@@ -132,7 +132,6 @@ pub mod reply {
     use serde::{Deserialize, Serialize};
     use serde_with::serde_as;
     use std::convert::From;
-    use web3::types::H160;
 
     /// L2 Block status as returned by the RPC API.
     #[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -185,6 +184,7 @@ pub mod reply {
     }
 
     /// L2 Block as returned by the RPC API.
+    #[serde_as]
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
     #[serde(deny_unknown_fields)]
     pub struct Block {
@@ -192,41 +192,52 @@ pub mod reply {
         pub parent_hash: StarknetBlockHash,
         pub block_number: Option<StarknetBlockNumber>,
         pub status: BlockStatus,
-        pub sequencer: H160,
+        pub sequencer: SequencerAddress,
         pub new_root: Option<GlobalRoot>,
         pub old_root: GlobalRoot,
         pub accepted_time: StarknetBlockTimestamp,
+        #[serde_as(as = "GasPriceAsHexStr")]
+        pub gas_price: GasPrice,
         pub transactions: Transactions,
     }
 
     impl Block {
+        /// Constructs [Block] from [RawBlock]
         pub fn from_raw(block: RawBlock, transactions: Transactions) -> Self {
             Self {
                 block_hash: Some(block.hash),
                 parent_hash: block.parent_hash,
                 block_number: Some(block.number),
                 status: block.status,
-                // This only matters once the sequencers are distributed.
-                sequencer: H160::zero(),
+                sequencer: block.sequencer,
                 new_root: Some(block.root),
                 old_root: block.parent_root,
                 accepted_time: block.timestamp,
+                gas_price: block.gas_price,
                 transactions,
             }
         }
 
+        /// Constructs [Block] from [sequencer's block representation](crate::sequencer::reply::Block)
         pub fn from_sequencer_scoped(block: seq::Block, scope: BlockResponseScope) -> Self {
             Self {
                 block_hash: block.block_hash,
                 parent_hash: block.parent_block_hash,
                 block_number: block.block_number,
                 status: block.status.into(),
-                // This only matters once the sequencers are distributed.
-                sequencer: H160::zero(),
+                sequencer: block
+                    .sequencer_address
+                    // Default value for cairo <0.8.0 is 0
+                    .unwrap_or(SequencerAddress(StarkHash::ZERO)),
                 new_root: block.state_root,
                 // TODO where to get it from
                 old_root: GlobalRoot(StarkHash::ZERO),
                 accepted_time: block.timestamp,
+                gas_price: block
+                    .gas_price
+                    // Default value for cairo <0.8.2 is 0
+                    .unwrap_or(GasPrice::ZERO),
+
                 transactions: match scope {
                     BlockResponseScope::TransactionHashes => Transactions::HashesOnly(
                         block
@@ -285,6 +296,7 @@ pub mod reply {
         InvalidTransactionIndex = 27,
         PageSizeTooBig = 31,
         ContractError = 40,
+        InvalidContractDefinition = 50,
     }
 
     /// We can have this equality and should have it in order to use it for tests. It is meant to
@@ -366,6 +378,7 @@ pub mod reply {
                 27 => InvalidTransactionIndex,
                 31 => PageSizeTooBig,
                 40 => ContractError,
+                50 => InvalidContractDefinition,
                 x => return Err(x),
             })
         }
@@ -385,6 +398,7 @@ pub mod reply {
                 ErrorCode::InvalidTransactionIndex => "Invalid transaction index in a block",
                 ErrorCode::PageSizeTooBig => "Requested page size is too big",
                 ErrorCode::ContractError => "Contract error",
+                ErrorCode::InvalidContractDefinition => "Invalid contract definition",
             }
         }
     }
@@ -511,8 +525,11 @@ pub mod reply {
                 l1_origin_message: receipt
                     .l1_to_l2_consumed_message
                     .map(transaction_receipt::MessageToL2::from),
-                // TODO at the moment not available in sequencer replies
-                events: vec![],
+                events: receipt
+                    .events
+                    .into_iter()
+                    .map(transaction_receipt::Event::from)
+                    .collect(),
             }
         }
     }
@@ -573,9 +590,19 @@ pub mod reply {
         #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
         #[serde(deny_unknown_fields)]
         pub struct Event {
-            from_address: ContractAddress,
-            keys: Vec<EventKey>,
-            data: Vec<EventData>,
+            pub from_address: ContractAddress,
+            pub keys: Vec<EventKey>,
+            pub data: Vec<EventData>,
+        }
+
+        impl From<crate::sequencer::reply::transaction::Event> for Event {
+            fn from(e: crate::sequencer::reply::transaction::Event) -> Self {
+                Self {
+                    from_address: e.from_address,
+                    keys: e.keys,
+                    data: e.data,
+                }
+            }
         }
     }
 
@@ -654,16 +681,27 @@ pub mod reply {
 
     /// Starknet's syncing status substructures.
     pub mod syncing {
-        use crate::core::StarknetBlockHash;
+        use crate::{
+            core::{StarknetBlockHash, StarknetBlockNumber},
+            rpc::serde::StarknetBlockNumberAsHexStr,
+        };
         use serde::{Deserialize, Serialize};
+        use serde_with::serde_as;
 
         /// Represents Starknet node syncing status.
+        #[serde_as]
         #[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq)]
         #[serde(deny_unknown_fields)]
         pub struct Status {
-            pub starting_block: StarknetBlockHash,
-            pub current_block: StarknetBlockHash,
-            pub highest_block: StarknetBlockHash,
+            pub starting_block_hash: StarknetBlockHash,
+            #[serde_as(as = "StarknetBlockNumberAsHexStr")]
+            pub starting_block_num: StarknetBlockNumber,
+            pub current_block_hash: StarknetBlockHash,
+            #[serde_as(as = "StarknetBlockNumberAsHexStr")]
+            pub current_block_num: StarknetBlockNumber,
+            pub highest_block_hash: StarknetBlockHash,
+            #[serde_as(as = "StarknetBlockNumberAsHexStr")]
+            pub highest_block_num: StarknetBlockNumber,
         }
     }
 
@@ -699,5 +737,20 @@ pub mod reply {
         pub events: Vec<EmittedEvent>,
         pub page_number: usize,
         pub is_last_page: bool,
+    }
+
+    // Result type for starknet_addInvokeTransaction
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct InvokeTransactionResult {
+        pub transaction_hash: StarknetTransactionHash,
+    }
+
+    // Result type for starknet_addDeployTransaction
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct DeployTransactionResult {
+        pub transaction_hash: StarknetTransactionHash,
+        pub contract_address: ContractAddress,
     }
 }

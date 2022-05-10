@@ -628,8 +628,9 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "ff"
-version = "0.11.0"
-source = "git+https://github.com/eqlabs/ff?branch=derive_bitvec#87caad7d36cfb50bd2caba1c1d41abc1463f191f"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df689201f395c6b90dfe87127685f8dbfc083a5e779e613575d8bd7314300c3e"
 dependencies = [
  "byteorder",
  "ff_derive",
@@ -639,10 +640,12 @@ dependencies = [
 
 [[package]]
 name = "ff_derive"
-version = "0.11.0"
-source = "git+https://github.com/eqlabs/ff?branch=derive_bitvec#87caad7d36cfb50bd2caba1c1d41abc1463f191f"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95dddd96655a8ef19cc0dd2cb7063fb159f1583af0dbf3c04805ebc7dcc15849"
 dependencies = [
  "addchain",
+ "cfg-if",
  "num-bigint 0.3.3",
  "num-integer",
  "num-traits",
@@ -671,9 +674,9 @@ checksum = "279fb028e20b3c4c320317955b77c5e0c9701f05a1d309905d6fc702cdc5053e"
 
 [[package]]
 name = "flate2"
-version = "1.0.22"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e6988e897c1c9c485f43b47a529cef42fde0547f9d8d41a7062518f1d8fc53f"
+checksum = "b39522e96686d38f4bc984b9198e3a0613264abaebaff2c5c918bfa6b6da09af"
 dependencies = [
  "cfg-if",
  "crc32fast",
@@ -1514,12 +1517,11 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
-version = "0.4.4"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a92518e98c078586bc6c934028adcca4c92a53d6a958196de835170a01d84e4b"
+checksum = "d2b29bd4bc3f33391105ebee3589c19197c4271e3e5a9ec9bfe8127eeff8f082"
 dependencies = [
  "adler",
- "autocfg",
 ]
 
 [[package]]
@@ -1856,11 +1858,12 @@ dependencies = [
  "clap 3.1.6",
  "console-subscriber",
  "enum-iterator",
+ "flate2",
  "futures",
  "hex",
  "home",
  "http",
- "jsonrpc-core",
+ "hyper",
  "jsonrpsee",
  "lazy_static",
  "mockall",
@@ -1882,7 +1885,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "tracing-test",
  "vergen",
  "warp",
  "web3",
@@ -3120,29 +3122,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "tracing-test"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eb7bda2e93bbc9c5b247034acc6a4b3d04f033a3d4b8fc1cb87d4d1c7c7ebd7"
-dependencies = [
- "lazy_static",
- "tracing-core",
- "tracing-subscriber",
- "tracing-test-macro",
-]
-
-[[package]]
-name = "tracing-test-macro"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4801dca35e4e2cee957c469bd4a1c370fadb7894c0d50721a40eba3523e6e91c"
-dependencies = [
- "lazy_static",
- "quote",
- "syn",
 ]
 
 [[package]]

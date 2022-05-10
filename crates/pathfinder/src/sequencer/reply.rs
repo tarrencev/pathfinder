@@ -1,24 +1,31 @@
 //! Structures used for deserializing replies from Starkware's sequencer REST API.
 use crate::{
     core::{
-        CallResultValue, EthereumAddress, GlobalRoot, StarknetBlockHash, StarknetBlockNumber,
-        StarknetBlockTimestamp,
+        CallResultValue, EthereumAddress, GasPrice, GlobalRoot, SequencerAddress,
+        StarknetBlockHash, StarknetBlockNumber, StarknetBlockTimestamp,
     },
-    rpc::serde::EthereumAddressAsHexStr,
+    rpc::serde::{EthereumAddressAsHexStr, GasPriceAsHexStr},
 };
 use serde::Deserialize;
 use serde_with::serde_as;
 
 /// Used to deserialize replies to [ClientApi::block_by_hash](crate::sequencer::ClientApi::block_by_hash) and
 /// [ClientApi::block_by_number](crate::sequencer::ClientApi::block_by_number).
+#[serde_as]
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(deny_unknown_fields)]
 pub struct Block {
     #[serde(default)]
     pub block_hash: Option<StarknetBlockHash>,
     #[serde(default)]
     pub block_number: Option<StarknetBlockNumber>,
+    #[serde_as(as = "Option<GasPriceAsHexStr>")]
+    #[serde(default)]
+    pub gas_price: Option<GasPrice>,
     pub parent_block_hash: StarknetBlockHash,
+    #[serde(default)]
+    pub sequencer_address: Option<SequencerAddress>,
     #[serde(default)]
     pub state_root: Option<GlobalRoot>,
     pub status: Status,
@@ -29,6 +36,7 @@ pub struct Block {
 
 /// Block and transaction status values.
 #[derive(Copy, Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(deny_unknown_fields)]
 pub enum Status {
     #[serde(rename = "NOT_RECEIVED")]
@@ -335,4 +343,68 @@ pub struct EthContractAddresses {
     #[serde_as(as = "EthereumAddressAsHexStr")]
     #[serde(rename = "GpsStatementVerifier")]
     pub gps_statement_verifier: EthereumAddress,
+}
+
+pub mod add_transaction {
+    use crate::core::{ContractAddress, StarknetTransactionHash};
+
+    /// API response for an INVOKE_FUNCTION transaction
+    #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct InvokeResponse {
+        pub code: String, // TRANSACTION_RECEIVED
+        pub transaction_hash: StarknetTransactionHash,
+    }
+
+    /// API response for a DEPLOY transaction
+    #[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct DeployResponse {
+        pub code: String, // TRANSACTION_RECEIVED
+        pub transaction_hash: StarknetTransactionHash,
+        pub address: ContractAddress,
+    }
+
+    #[cfg(test)]
+    mod serde_test {
+        use pedersen::StarkHash;
+
+        use super::*;
+
+        #[test]
+        fn test_invoke_response() {
+            let result = serde_json::from_str::<InvokeResponse>(r#"{"code": "TRANSACTION_RECEIVED", "transaction_hash": "0x389dd0629f42176cc8b6c43acefc0713d0064ecdfc0470e0fc179f53421a38b"}"#).unwrap();
+            let expected = InvokeResponse {
+                code: "TRANSACTION_RECEIVED".to_owned(),
+                transaction_hash: StarknetTransactionHash(
+                    StarkHash::from_hex_str(
+                        "0x389dd0629f42176cc8b6c43acefc0713d0064ecdfc0470e0fc179f53421a38b",
+                    )
+                    .unwrap(),
+                ),
+            };
+            assert_eq!(expected, result);
+        }
+
+        #[test]
+        fn test_deploy_response() {
+            let result = serde_json::from_str::<DeployResponse>(r#"{"code": "TRANSACTION_RECEIVED", "transaction_hash": "0x296fb89b8a1c7487a1d4b27e1a1e33f440b05548e64980d06052bc089b1a51f", "address": "0x677bb1cdc050e8d63855e8743ab6e09179138def390676cc03c484daf112ba1"}"#).unwrap();
+            let expected = DeployResponse {
+                code: "TRANSACTION_RECEIVED".to_owned(),
+                transaction_hash: StarknetTransactionHash(
+                    StarkHash::from_hex_str(
+                        "0x296fb89b8a1c7487a1d4b27e1a1e33f440b05548e64980d06052bc089b1a51f",
+                    )
+                    .unwrap(),
+                ),
+                address: ContractAddress(
+                    StarkHash::from_hex_str(
+                        "0x677bb1cdc050e8d63855e8743ab6e09179138def390676cc03c484daf112ba1",
+                    )
+                    .unwrap(),
+                ),
+            };
+            assert_eq!(expected, result);
+        }
+    }
 }

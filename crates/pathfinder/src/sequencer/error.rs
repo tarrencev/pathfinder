@@ -6,23 +6,18 @@ use serde::{Deserialize, Serialize};
 /// Sequencer errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SequencerError {
-    /// All errors related to deserializing sequencer replies.
-    #[error("Failed to deserialize sequencer reply: {0}")]
-    DeserializationError(#[from] serde_json::Error),
     /// Starknet specific errors.
-    #[error("Starknet error: {0}")]
+    #[error(transparent)]
     StarknetError(#[from] StarknetError),
-    /// Networking and protocol related errors.
-    #[error("Sequencer transport error: {0}")]
-    TransportError(#[from] reqwest::Error),
+    /// All other kinds of errors
+    #[error(transparent)]
+    ReqwestError(#[from] reqwest::Error),
 }
 
 impl From<SequencerError> for rpc::Error {
     fn from(e: SequencerError) -> Self {
         match e {
-            SequencerError::DeserializationError(e) => {
-                rpc::Error::Call(rpc::CallError::Failed(e.into()))
-            }
+            SequencerError::ReqwestError(e) => rpc::Error::Call(rpc::CallError::Failed(e.into())),
             SequencerError::StarknetError(e) => match e.code {
                 StarknetErrorCode::OutOfRangeBlockHash | StarknetErrorCode::BlockNotFound
                     if e.message.contains("Block hash") =>
@@ -42,9 +37,17 @@ impl From<SequencerError> for rpc::Error {
                 StarknetErrorCode::BlockNotFound if e.message.contains("Block number") => {
                     RpcErrorCode::InvalidBlockNumber.into()
                 }
-                _ => rpc::Error::Call(rpc::CallError::Failed(e.into())),
+                StarknetErrorCode::InvalidContractDefinition => {
+                    RpcErrorCode::InvalidContractDefinition.into()
+                }
+                StarknetErrorCode::BlockNotFound
+                | StarknetErrorCode::SchemaValidationError
+                | StarknetErrorCode::MalformedRequest
+                | StarknetErrorCode::UnsupportedSelectorForFee
+                | StarknetErrorCode::OutOfRangeBlockHash => {
+                    rpc::Error::Call(rpc::CallError::Failed(e.into()))
+                }
             },
-            SequencerError::TransportError(e) => rpc::Error::Call(rpc::CallError::Failed(e.into())),
         }
     }
 }
@@ -90,4 +93,8 @@ pub enum StarknetErrorCode {
     OutOfRangeTransactionHash,
     #[serde(rename = "StarkErrorCode.MALFORMED_REQUEST")]
     MalformedRequest,
+    #[serde(rename = "StarknetErrorCode.UNSUPPORTED_SELECTOR_FOR_FEE")]
+    UnsupportedSelectorForFee,
+    #[serde(rename = "StarknetErrorCode.INVALID_CONTRACT_DEFINITION")]
+    InvalidContractDefinition,
 }

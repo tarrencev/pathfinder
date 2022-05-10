@@ -2,9 +2,10 @@
 use crate::{
     cairo::ext_py,
     core::{
-        CallResultValue, ContractAddress, ContractCode, GlobalRoot, StarknetBlockHash,
+        CallResultValue, CallSignatureElem, ConstructorParam, ContractAddress, ContractAddressSalt,
+        ContractCode, Fee, GasPrice, GlobalRoot, SequencerAddress, StarknetBlockHash,
         StarknetBlockNumber, StarknetBlockTimestamp, StarknetTransactionHash,
-        StarknetTransactionIndex, StorageValue,
+        StarknetTransactionIndex, StorageValue, TransactionVersion,
     },
     ethereum::Chain,
     rpc::types::{
@@ -15,7 +16,7 @@ use crate::{
         request::{BlockResponseScope, Call, EventFilter, OverflowingStorageAddress},
         BlockHashOrTag, BlockNumberOrTag, Tag,
     },
-    sequencer::{self, ClientApi},
+    sequencer::{self, request::add_transaction::ContractDefinition, ClientApi},
     state::SyncState,
     storage::{
         EventFilterError, RefsTable, StarknetBlocksBlockId, StarknetBlocksTable,
@@ -31,11 +32,13 @@ use pedersen::StarkHash;
 use std::convert::TryInto;
 use std::sync::Arc;
 
+use super::types::reply::{DeployTransactionResult, InvokeTransactionResult};
+
 /// Implements JSON-RPC endpoints.
 pub struct RpcApi {
     storage: Storage,
     sequencer: sequencer::Client,
-    chain: Chain,
+    chain_id: &'static str,
     call_handle: Option<ext_py::Handle>,
     sync_state: Arc<SyncState>,
 }
@@ -49,6 +52,8 @@ pub struct RawBlock {
     pub parent_root: GlobalRoot,
     pub timestamp: StarknetBlockTimestamp,
     pub status: BlockStatus,
+    pub sequencer: SequencerAddress,
+    pub gas_price: GasPrice,
 }
 
 /// Based on [the Starknet operator API spec](https://github.com/starkware-libs/starknet-specs/blob/master/api/starknet_api_openrpc.json).
@@ -62,7 +67,12 @@ impl RpcApi {
         Self {
             storage,
             sequencer,
-            chain,
+            chain_id: match chain {
+                // Hex str for b"SN_GOERLI"
+                Chain::Goerli => "0x534e5f474f45524c49",
+                // Hex str for b"SN_MAIN"
+                Chain::Mainnet => "0x534e5f4d41494e",
+            },
             call_handle: None,
             sync_state,
         }
@@ -306,6 +316,8 @@ impl RpcApi {
                 parent_root,
                 timestamp: block.timestamp,
                 status: block_status,
+                gas_price: block.gas_price,
+                sequencer: block.sequencer_address,
             };
 
             Ok(block)
@@ -889,13 +901,8 @@ impl RpcApi {
     }
 
     /// Return the currently configured StarkNet chain id.
-    pub async fn chain_id(&self) -> RpcResult<String> {
-        use super::serde::bytes_to_hex_str;
-
-        Ok(bytes_to_hex_str(match self.chain {
-            Chain::Goerli => b"SN_GOERLI",
-            Chain::Mainnet => b"SN_MAIN",
-        }))
+    pub async fn chain_id(&self) -> RpcResult<&'static str> {
+        Ok(self.chain_id)
     }
 
     // /// Returns the transactions in the transaction pool, recognized by this sequencer.
@@ -949,6 +956,53 @@ impl RpcApi {
             .map_err(internal_server_error)
             // flatten is unstable
             .and_then(|x| x)
+    }
+
+    /// Submit a new transaction to be added to the chain.
+    ///
+    /// This method just forwards the request received over the JSON-RPC
+    /// interface to the sequencer.
+    pub async fn add_invoke_transaction(
+        &self,
+        call: Call,
+        signature: Vec<CallSignatureElem>,
+        max_fee: Fee,
+        version: TransactionVersion,
+    ) -> RpcResult<InvokeTransactionResult> {
+        let mut call: sequencer::request::Call = call.into();
+        call.signature = signature;
+
+        let result = self
+            .sequencer
+            .add_invoke_transaction(call, max_fee, version)
+            .await?;
+        Ok(InvokeTransactionResult {
+            transaction_hash: result.transaction_hash,
+        })
+    }
+
+    /// Submit a new deploy contract transaction.
+    ///
+    /// This method just forwards the request received over the JSON-RPC
+    /// interface to the sequencer.
+    pub async fn add_deploy_transaction(
+        &self,
+        contract_address_salt: ContractAddressSalt,
+        constructor_calldata: Vec<ConstructorParam>,
+        contract_definition: ContractDefinition,
+    ) -> RpcResult<DeployTransactionResult> {
+        let result = self
+            .sequencer
+            .add_deploy_transaction(
+                contract_address_salt,
+                constructor_calldata,
+                contract_definition,
+            )
+            .await?;
+        Ok(DeployTransactionResult {
+            transaction_hash: result.transaction_hash,
+            contract_address: result.address,
+        })
     }
 }
 
