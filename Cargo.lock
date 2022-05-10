@@ -2055,6 +2055,7 @@ dependencies = [
  "hex",
  "home",
  "http",
+ "hyper",
  "jsonrpsee",
  "lazy_static",
  "mockall",
